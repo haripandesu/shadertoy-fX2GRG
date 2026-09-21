@@ -35,6 +35,19 @@
     background: #2a1215; color: #ffb4b4; border: 1px solid #7a2e2e; border-radius: 10px;
     padding: 18px 22px; white-space: pre-wrap; font: 12.5px/1.6 Consolas, monospace;
     max-height: 70vh; overflow: auto; z-index: 10; }
+  #intro { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    z-index: 8; transition: opacity .45s ease; }
+  #intro.hide { opacity: 0; pointer-events: none; }
+  #introCard { width: min(360px, 84vw); background: rgba(16,18,24,.78); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 12px; padding: 16px 20px 14px; backdrop-filter: blur(6px); color: #cfd3dc;
+    text-align: center; box-shadow: 0 8px 30px rgba(0,0,0,.45); }
+  #introCard h3 { margin: 0 0 10px; font-size: 13.5px; color: #fff; letter-spacing: .05em; }
+  #introCard .k { margin: 7px 0; font-size: 12.5px; color: #b9bfca; }
+  #introCard .keys { display: inline-block; background: #23262e; border: 1px solid #3a3f4b;
+    border-radius: 6px; padding: 2px 8px; margin: 0 2px; color: #e6e9ef; font-size: 12px; }
+  #btnIntroOk { margin-top: 12px; background: #2f5db3; color: #fff; border: 1px solid #4a79cf;
+    border-radius: 8px; padding: 6px 26px; font-size: 13px; cursor: pointer; }
+  #btnIntroOk:hover { background: #3a6cc7; }
 </style>
 </head>
 <body>
@@ -59,6 +72,16 @@
 </div>
 
 <div id="err" hidden></div>
+
+<div id="intro">
+  <div id="introCard">
+    <h3>操 作 提 示</h3>
+    <div class="k"><span class="keys">W A S D</span> 或 <span class="keys">↑ ↓ ← →</span> 控制虫子移动</div>
+    <div class="k"><span class="keys">鼠标滚轮</span> 放大 / 缩小画面</div>
+    <div class="k"><span class="keys">鼠标拖拽</span> 改变视角</div>
+    <button id="btnIntroOk">确 认</button>
+  </div>
+</div>
 
 <div id="panel">
   <h3>参数</h3>
@@ -658,6 +681,11 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   });
   document.getElementById("btnPanel").addEventListener("click", () =>
     document.getElementById("panel").classList.toggle("hidden"));
+  document.getElementById("btnIntroOk").addEventListener("click", () => {
+    const intro = document.getElementById("intro");
+    intro.classList.add("hide");
+    setTimeout(() => intro.remove(), 500);
+  });
 
   // ---------- 人形位置（方向键/WASD 控制，贴地行走） ----------
   const creaturePos = { x: 0, z: 0 };
