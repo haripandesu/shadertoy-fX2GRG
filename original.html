@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>The Horror of the Moorlands — 原版复刻（参数可调）</title>
+<title>The Horror of the Moorlands — 原版复刻</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
     font-family: "Segoe UI", system-ui, -apple-system, "Microsoft YaHei", sans-serif; }
@@ -42,7 +42,7 @@
 
 <div id="hud">
   <div class="t">The Horror of the Moorlands</div>
-  <div class="s">原版复刻（参数可调） · 原作：<a href="https://www.shadertoy.com/view/fX2GRG" target="_blank" rel="noopener">shadertoy.com/view/fX2GRG</a> · <a href="original.html">参数版（含走路）</a> · <a href="art.html">绘画版</a> · 方向键/WASD 让根须爬行</div>
+  <div class="s">原版复刻 · 原作：<a href="https://www.shadertoy.com/view/fX2GRG" target="_blank" rel="noopener">shadertoy.com/view/fX2GRG</a> · <a href="roots.html">不安根须（新作品）</a> · <a href="original-pure.html">纯原版（无面板）</a> · <a href="art.html">绘画版（参数可调）</a></div>
   <div class="s" id="stat"></div>
 </div>
 
@@ -65,8 +65,134 @@
   <div id="sliders"></div>
 </div>
 
-<!-- ============ Buffer A：光线步进渲染荒原与生物（与 Shadertoy 原作逐字一致） ============ -->
-<script type="x-shader/x-fragment" id="shader-bufferA">mat2 Rotation(float a)
+<!-- ============ Buffer A：光线步进渲染荒原与生物（原样保留） ============ -->
+<script type="x-shader/x-fragment" id="shader-bufferA">float Hash(vec2 p)
+{
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+float Noise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = Hash(i);
+    float b = Hash(i + vec2(1.0, 0.0));
+    float c = Hash(i + vec2(0.0, 1.0));
+    float d = Hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x),mix(c, d, f.x),f.y);
+}
+
+vec4 Random(vec2 p)
+{
+    return vec4(vec3(Noise(p)), 1.0);
+}
+
+vec4 SampleColor(vec2 pos, vec2 randomOffset, float ramp, float randomScale, float scaleFactor)
+{
+    vec4 offset = (Random((pos + randomOffset) * 0.05 * randomScale / scaleFactor + vec2(iTime*0.40*uJitterSpeed)) - 0.5) * 10.0 * ramp * uJitter;
+    vec2 uv = (pos + offset.xy * scaleFactor + vec2(iTime*9.0, iTime*3.5)*uShift) / iResolution.xy;
+    return texture(iChannel0, uv);
+}
+
+float Luminance(vec2 pos, vec2 randomOffset, float ramp, float randomScale, float scaleFactor)
+{
+    vec3 color = SampleColor(pos, randomOffset, ramp, randomScale, scaleFactor).xyz;
+    return clamp(dot(color, vec3(0.333)), 0.0, 1.0);
+}
+
+vec2 Gradient(vec2 pos, float eps, vec2 randomOffset, float ramp, float randomScale, float scaleFactor)
+{
+    vec2 d = vec2(eps, 0.0);
+    float gx = Luminance(pos + d.xy, randomOffset, ramp, randomScale, scaleFactor);
+    gx -= Luminance(pos - d.xy, randomOffset, ramp, randomScale, scaleFactor);
+    float gy = Luminance(pos + d.yx, randomOffset, ramp, randomScale, scaleFactor);
+    gy -= Luminance(pos - d.yx, randomOffset, ramp, randomScale, scaleFactor);
+    return vec2(gx, gy) / (eps * 2.0);
+}
+
+float EdgeContribution(vec2 fragCoord, float fi, int layerCount, float scaleFactor)
+{
+    float threshold = 0.03 + 0.25 * fi;
+    float width = threshold * 2.0;
+    float brightness = 0.0;
+    float ramp = 0.15 * pow(1.3, fi * 5.0) * uJitter;
+    float randomScale = 1.7 * pow(1.3, -fi * 5.0);
+    float grad = length(Gradient(fragCoord, 0.4 * scaleFactor, vec2(0.0), ramp, randomScale, scaleFactor));
+    grad *= scaleFactor;
+    brightness += 0.6 * (0.5 + fi) * smoothstep(threshold - width * 0.5,threshold + width * 0.5, grad) * uEdge; 
+    ramp = 0.3 * pow(1.3, fi * 5.0) * uJitter;
+    randomScale = 10.7 * pow(1.3, -fi * 5.0);
+    grad = length(Gradient(fragCoord, 0.4 * scaleFactor, vec2(0.0), ramp, randomScale, scaleFactor));
+    grad *= scaleFactor;
+    brightness += 0.4 * (0.2 + fi) * smoothstep(threshold - width * 0.5,threshold + width * 0.5, grad) * uEdge;
+    return brightness;
+}
+
+float HatchLayer(vec2 fragCoord, int layerIndex, float scaleFactor, vec4 randomDelta, out float hatchMax)
+{
+    vec2 position = fragCoord + 1.5 * scaleFactor * (Random(fragCoord * 0.02 + iTime*0.25*uJitterSpeed).xy - 0.5) * uJitter
+                  + vec2(iTime*10.0, iTime*4.0)*uShift;
+    float brightness = Luminance(position, vec2(0.0), 0.0, 1.0, scaleFactor) * 1.7;
+    float angle = -0.5 - 0.08 * float(layerIndex * layerIndex);
+    vec2 basis = cos(angle - vec2(0.0, 1.6));
+    mat2 rotation = mat2(basis, basis.yx * vec2(-1.0, 1.0));
+    vec2 hatchUv =  rotation * fragCoord / sqrt(scaleFactor) * vec2(0.05 * uDensity, 1.0) * 1.3;
+    // 卷曲：把直排线揉弯（幅度与速度可调）
+    hatchUv += uCurl * vec2(sin(hatchUv.y * 0.45 + iTime*0.40*uJitterSpeed), cos(hatchUv.x * 0.40 + iTime*0.34*uJitterSpeed)) * 7.0;
+    vec4 randomHatch = pow(Random(hatchUv + vec2(sin(hatchUv.y), 0.0) + iTime*0.30*uJitterSpeed), vec4(1.0));
+    float wOff = (uWidth - 1.0) * 0.45;
+    float hatch = 1.0 - smoothstep(0.5 - wOff, 1.5 - wOff*0.6, randomHatch.x + brightness) - 0.3 * abs(randomDelta.z);
+    hatchMax = max(hatchMax, hatch);
+    return hatch;
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    float scaleFactor = 2.0;
+    vec4 randomBase = Random(fragCoord * 1.2 / sqrt(scaleFactor) + iTime*0.30*uJitterSpeed);
+    vec4 randomDelta = randomBase - Random(fragCoord * 1.2 / sqrt(scaleFactor) + vec2(1.0, -1.0) * 1.5 + iTime*0.30*uJitterSpeed);
+    float edgeBrightness = 0.0;
+    int edgeLayers = 3;
+    for (int i = 0; i < edgeLayers; i++)
+    {
+        float fi = float(i) / float(edgeLayers - 1);
+        edgeBrightness += EdgeContribution(fragCoord, fi, edgeLayers, scaleFactor);
+    }
+    vec3 color = vec3(1.0) - 0.7 * edgeBrightness * (0.5 + 0.5 * randomBase.z) * 3.0 / float(edgeLayers);
+    color = clamp(color, 0.0, 1.0);
+    int hatchLayers = 5;
+    float hatchAccum = 0.0;
+    float hatchMax = 0.0;
+    float hatchCount = 0.0;
+    for (int i = 0; i < hatchLayers; i++)
+    {
+        float hatch = HatchLayer(fragCoord, i, scaleFactor, randomDelta, hatchMax);
+        hatchAccum += hatch;
+        hatchCount += 1.0;
+        float brightness = Luminance(fragCoord, vec2(0.0), 0.0, 1.0, scaleFactor) * 1.7;
+        if (float(i) > (1.0 - brightness) * float(hatchLayers) && i >= 2) break;
+    }
+    float hatchMix = clamp(mix(hatchAccum / hatchCount, hatchMax, 0.5), 0.0, 1.0);
+    color *= 1.0 - hatchMix;
+    // 小尺寸人形的可读剪影：依据场景 Pass 写在 alpha 通道的人形遮罩，压成墨色
+    float figM = 0.0;
+    for (int i = 0; i < 9; i++)
+    {
+        float aa = 6.2832 * float(i) / 9.0;
+        float rr = 1.0 + 2.5 * Random(vec2(float(i)*7.3, 1.7)).x;
+        vec2 px = fragCoord + vec2(cos(aa), sin(aa)) * rr;
+        figM += texture(iChannel0, px / iResolution.xy).a;
+    }
+    figM /= 9.0;
+    color = mix(color, vec3(0.10), smoothstep(0.30, 0.55, figM) * 0.8);
+    fragColor = vec4(color, 1.0);
+}</script>
+
+<!-- ============ Image：边缘 + 排线风格化后处理（原样保留） ============ -->
+<script type="x-shader/x-fragment" id="shader-image">mat2 Rotation(float a)
 {
     float s = sin(a);
     float c = cos(a);
@@ -118,6 +244,13 @@ float Capsule(vec3 p, vec3 a, vec3 b, float r)
     return length(pa-ba*h)-r;
 }
 
+vec3 RotX(vec3 p, float a)
+{
+    float s = sin(a);
+    float c = cos(a);
+    return vec3(p.x, c*p.y - s*p.z, s*p.y + c*p.z);
+}
+
 float Terrain(vec2 xz)
 {
     float h = Fbm(xz*.12)*3.0;
@@ -134,10 +267,15 @@ float Smin(float a, float b, float k)
 
 float Creature(vec3 p)
 {
-    p.xz *= Rotation(3.14159);
-    float t = 0.0;
-    p.y-=2.6;
-    p.z += p.y*0.08;
+    p.xz *= Rotation(3.14159 + uYaw);
+    p.y -= 2.6;
+    float phase = uCreature.z;
+    float walk = uCreature.w;
+    // 走动：身体起伏 + 轻微前倾
+    p.y += abs(sin(phase)) * 0.10 * walk;
+    float ln = 0.10 * walk;
+    p.yz = vec2(cos(ln)*p.y - sin(ln)*p.z, sin(ln)*p.y + cos(ln)*p.z);
+    p.z += p.y * 0.08;
     vec3 tp = p;
     tp.y -= 2.2;
     float chest = Sphere(tp * vec3(1.2,1.0,0.8),0.9);
@@ -153,19 +291,32 @@ float Creature(vec3 p)
     head = Smin(head, face, 0.2);
     float shoulderL = Sphere(p - vec3(-0.55,2.7,0), 0.28);
     float shoulderR = Sphere(p - vec3(0.55,2.7,0),0.28);
-    float armL1 = Capsule(p,vec3(-0.45,2.6,0),vec3(-1.0,1.8,0.15),0.12);
-    float armL2 = Capsule(p,vec3(-1.0,1.8,0.15),vec3(-1.15,0.8,0.3),0.09);
-    float armR1 = Capsule(p,vec3(0.45,2.6,0),vec3(1.0,1.8,0.15),0.12);
-    float armR2 = Capsule(p,vec3(1.0,1.8,0.15),vec3(1.15,0.8,0.3),0.09);
-    float clawL = Capsule(p,vec3(-1.15,0.8,0.3),vec3(-1.35,0.55,0.65),0.035);
-    float clawR = Capsule(p,vec3(1.15,0.8,0.3),vec3(1.35,0.55,0.65),0.035);
+    // 手臂：行走时前后摆动（与对侧腿反相）
+    float aArm = sin(phase + 3.14159) * 0.40 * walk;
+    vec3 paL = RotX(p - vec3(-0.45,2.6,0), aArm);
+    float armL1 = Capsule(paL,vec3(0.0),vec3(-0.55,-0.8,0.15),0.12);
+    float armL2 = Capsule(paL,vec3(-0.55,-0.8,0.15),vec3(-0.70,-1.8,0.30),0.09);
+    float clawL = Capsule(paL,vec3(-0.70,-1.8,0.30),vec3(-0.90,-2.05,0.65),0.035);
+    vec3 paR = RotX(p - vec3(0.45,2.6,0), -aArm);
+    float armR1 = Capsule(paR,vec3(0.0),vec3(0.55,-0.8,0.15),0.12);
+    float armR2 = Capsule(paR,vec3(0.55,-0.8,0.15),vec3(0.70,-1.8,0.30),0.09);
+    float clawR = Capsule(paR,vec3(0.70,-1.8,0.30),vec3(0.90,-2.05,0.65),0.035);
     float hips = Sphere((p-vec3(0,1.0,0))*vec3(1.0,0.8,0.8),0.45);
-    float legL1 = Capsule(p,vec3(-0.22,0.9,0),vec3(-0.28,-0.3,0.05),0.14);
-    float legL2 = Capsule(p,vec3(-0.28,-0.3,0.05),vec3(-0.22,-1.5,0.2),0.1);
-    float legR1 = Capsule(p,vec3(0.22,0.9,0),vec3(0.28,-0.3,0.05),0.14);
-    float legR2 = Capsule(p,vec3(0.28,-0.3,0.05),vec3(0.22,-1.5,0.2),0.1);
-    float footL = Capsule(p,vec3(-0.22,-1.5,0.2),vec3(-0.22,-1.55,0.6),0.08);
-    float footR = Capsule(p,vec3(0.22,-1.5,0.2),vec3(0.22,-1.55,0.6),0.08);
+    // 腿：髋部摆动 + 膝部弯曲（左右反相）
+    float aL = sin(phase) * 0.55 * walk;
+    float kL = max(sin(phase + 1.3), 0.0) * 0.95 * walk;
+    vec3 pl = RotX(p - vec3(-0.22,0.9,0), aL);
+    float legL1 = Capsule(pl,vec3(0.0),vec3(-0.06,-1.2,0.05),0.14);
+    vec3 pkl = RotX(pl - vec3(-0.06,-1.2,0.05), -kL);
+    float legL2 = Capsule(pkl,vec3(0.0),vec3(0.06,-1.2,0.15),0.075);
+    float footL = Capsule(pkl,vec3(0.06,-1.2,0.15),vec3(0.06,-1.25,0.55),0.06);
+    float aR = sin(phase + 3.14159) * 0.55 * walk;
+    float kR = max(sin(phase + 1.3 + 3.14159), 0.0) * 0.95 * walk;
+    vec3 pr = RotX(p - vec3(0.22,0.9,0), aR);
+    float legR1 = Capsule(pr,vec3(0.0),vec3(0.06,-1.2,0.05),0.10);
+    vec3 pkr = RotX(pr - vec3(0.06,-1.2,0.05), -kR);
+    float legR2 = Capsule(pkr,vec3(0.0),vec3(-0.06,-1.2,0.15),0.075);
+    float footR = Capsule(pkr,vec3(-0.06,-1.2,0.15),vec3(-0.06,-1.25,0.55),0.06);
     float d = torso;
     d = Smin(d, head, 0.3);
     d = Smin(d, shoulderL, 0.2);
@@ -186,70 +337,11 @@ float Creature(vec3 p)
     return d;
 }
 
-float sdSeg(vec3 p, vec3 a, vec3 b)
-{
-    vec3 pa = p - a, ba = b - a;
-    float h = clamp(dot(pa, ba)/dot(ba, ba), 0.0, 1.0);
-    return length(pa - ba*h);
-}
-
-// 丛生根须：参考真实根系形态——地表处纠结粗壮的根冠，
-// 数条弯扭主根呈不对称扇形向外伸展，中段分出细侧根，逐级变细，
-// 部分根拱起地表形成剪影；整体由 iTime 驱动持续细微蠕动。
-float RootCluster(vec3 p)
-{
-    // 转体：身体朝向随方向键转动（配合迈步完成转身）
-    float ca = cos(uTurn), sa = sin(uTurn);
-    vec2 rot = mat2(ca, sa, -sa, ca) * p.xz;
-    p = vec3(rot.x, p.y, rot.y);
-
-    float d = 1e9;
-
-    // ---- 分节躯干：高于地面，爬行时沿体轴传递起伏波（非纯圆柱） ----
-    vec3 prev = vec3(0.0, 0.14, -0.80);
-    float prevR = 0.09;
-    for (int s = 0; s < 6; s++)
-    {
-        float fs = float(s);
-        float wave = sin(uGaitT*1.8 + fs*1.15);
-        vec3 c = vec3(sin(fs*2.3 + uGaitT*0.4)*0.035*(0.4 + uCrawl),
-                      0.34 + wave*(0.02 + 0.035*uCurl),
-                      -0.62 + fs*0.30);
-        float rr = 0.11 + 0.07*sin(fs/5.0*3.1416);
-        d = min(d, sdSeg(p, prev, c) - (prevR + rr)*0.5);
-        d = min(d, length(p - c) - rr);
-        // ---- 每节两侧的腿：相位交错，轮流抬起前摆（足部动作明显） ----
-        if (s >= 1)
-        {
-            float phL = uGaitT*1.7 + fs*1.5;
-            float phR = phL + 3.1416;
-            float liftL = max(0.0, sin(phL));
-            float liftR = max(0.0, sin(phR));
-            vec3 hipL = vec3(-rr*0.7, c.y - rr*0.4, c.z);
-            vec3 hipR = vec3( rr*0.7, c.y - rr*0.4, c.z);
-            vec3 footL = vec3(-(rr + 0.30), liftL*0.13, c.z + 0.10 + (liftL - 0.3)*0.16*(0.4 + uCrawl));
-            vec3 footR = vec3( rr + 0.30, liftR*0.13, c.z + 0.06 + (liftR - 0.3)*0.16*(0.4 + uCrawl));
-            vec3 kneeL = mix(hipL, footL, 0.5) + vec3(-0.07, 0.10 + liftL*0.08, 0.0);
-            vec3 kneeR = mix(hipR, footR, 0.5) + vec3( 0.07, 0.10 + liftR*0.08, 0.0);
-            float r = 0.042 - fs*0.002;
-            d = min(d, sdSeg(p, hipL, kneeL) - r);
-            d = min(d, sdSeg(p, kneeL, footL) - r*0.7);
-            d = min(d, sdSeg(p, hipR, kneeR) - r);
-            d = min(d, sdSeg(p, kneeR, footR) - r*0.7);
-        }
-        prev = c; prevR = rr;
-    }
-
-    // 揉弯：噪声轻微侵蚀距离（轮廓破碎毛躁）
-    float wig = Noise(p.xz*6.5 + vec2(0.0, iTime*0.25)) - 0.5;
-    d -= wig*0.045;
-    return d;
-}
-
 vec2 Map(vec3 p)
 {
     float g = p.y - Terrain(p.xz);
-    float c = RootCluster((p - uCreaturePos)/uFigSize)*uFigSize;
+    vec3 cp = vec3(uCreature.x, Terrain(uCreature.xz), uCreature.z);
+    float c = Creature((p - cp)/uFigSize)*uFigSize;
     if(c < g) return vec2(c,1.);
     return vec2(g,2.);
 }
@@ -308,6 +400,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     vec3 col = mix(vec3(0.02,0.03,0.08),vec3(0.4,0.05,0.08),uv.y*0.5+0.5);
     vec2 muv = uv - vec2(0.45,0.25);
     vec2 hit = Raymarching(ro,rd);
+    float fig = 0.0;
     if(hit.x < 120.)
     {
         vec3 p = ro + rd*hit.x;
@@ -320,6 +413,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         float rim = pow(1.-max(dot(n,-rd),0.),3.);
         if(hit.y < 1.5)
         {
+            fig = 1.0;
             vec3 base = vec3(0.03,0.03,0.04);
             base += vec3(0.4,0.0,0.0)*rim;
             vec3 lp = p;
@@ -337,122 +431,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
         vec3 fogCol = mix(vec3(0.6,0.2,0.3), vec3(0.1,0.6,1.0), uv.y + 0.3);
     }
     col = pow(col,vec3(.75));
-    fragColor = vec4(col,1);
-}</script>
-
-<!-- ============ Image：边缘 + 排线风格化后处理（与 Shadertoy 原作逐字一致） ============ -->
-<script type="x-shader/x-fragment" id="shader-image">float Hash(vec2 p)
-{
-    p = fract(p * vec2(123.34, 456.21));
-    p += dot(p, p + 45.32);
-    return fract(p.x * p.y);
-}
-
-float Noise(vec2 p)
-{
-    vec2 i = floor(p);
-    vec2 f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = Hash(i);
-    float b = Hash(i + vec2(1.0, 0.0));
-    float c = Hash(i + vec2(0.0, 1.0));
-    float d = Hash(i + vec2(1.0, 1.0));
-    return mix(mix(a, b, f.x),mix(c, d, f.x),f.y);
-}
-
-vec4 Random(vec2 p)
-{
-    return vec4(vec3(Noise(p)), 1.0);
-}
-
-vec4 SampleColor(vec2 pos, vec2 randomOffset, float ramp, float randomScale, float scaleFactor)
-{
-    vec4 offset = (Random((pos + randomOffset) * 0.05 * randomScale / scaleFactor + vec2(iTime*0.40*uJitterSpeed)) - 0.5) * 10.0 * ramp * uJitter;
-    vec2 uv = (pos + offset.xy * scaleFactor + vec2(iTime*9.0, iTime*3.5)*uShift) / iResolution.xy;
-    return texture(iChannel0, uv);
-}
-
-float Luminance(vec2 pos, vec2 randomOffset, float ramp, float randomScale, float scaleFactor)
-{
-    vec3 color = SampleColor(pos, randomOffset, ramp, randomScale, scaleFactor).xyz;
-    return clamp(dot(color, vec3(0.333)), 0.0, 1.0);
-}
-
-vec2 Gradient(vec2 pos, float eps, vec2 randomOffset, float ramp, float randomScale, float scaleFactor)
-{
-    vec2 d = vec2(eps, 0.0);
-    float gx = Luminance(pos + d.xy, randomOffset, ramp, randomScale, scaleFactor);
-    gx -= Luminance(pos - d.xy, randomOffset, ramp, randomScale, scaleFactor);
-    float gy = Luminance(pos + d.yx, randomOffset, ramp, randomScale, scaleFactor);
-    gy -= Luminance(pos - d.yx, randomOffset, ramp, randomScale, scaleFactor);
-    return vec2(gx, gy) / (eps * 2.0);
-}
-
-float EdgeContribution(vec2 fragCoord, float fi, int layerCount, float scaleFactor)
-{
-    float threshold = 0.03 + 0.25 * fi;
-    float width = threshold * 2.0;
-    float brightness = 0.0;
-    float ramp = 0.15 * pow(1.3, fi * 5.0) * uJitter;
-    float randomScale = 1.7 * pow(1.3, -fi * 5.0);
-    float grad = length(Gradient(fragCoord, 0.4 * scaleFactor, vec2(0.0), ramp, randomScale, scaleFactor));
-    grad *= scaleFactor;
-    brightness += 0.6 * (0.5 + fi) * smoothstep(threshold - width * 0.5,threshold + width * 0.5, grad) * uEdge;
-    ramp = 0.3 * pow(1.3, fi * 5.0) * uJitter;
-    randomScale = 10.7 * pow(1.3, -fi * 5.0);
-    grad = length(Gradient(fragCoord, 0.4 * scaleFactor, vec2(0.0), ramp, randomScale, scaleFactor));
-    grad *= scaleFactor;
-    brightness += 0.4 * (0.2 + fi) * smoothstep(threshold - width * 0.5,threshold + width * 0.5, grad) * uEdge;
-    return brightness;
-}
-
-float HatchLayer(vec2 fragCoord, int layerIndex, float scaleFactor, vec4 randomDelta, out float hatchMax)
-{
-    vec2 position = fragCoord + 1.5 * scaleFactor * (Random(fragCoord * 0.02 + iTime*0.25*uJitterSpeed).xy - 0.5) * uJitter
-                  + vec2(iTime*10.0, iTime*4.0)*uShift;
-    float brightness = Luminance(position, vec2(0.0), 0.0, 1.0, scaleFactor) * 1.7;
-    float angle = -0.5 - 0.08 * float(layerIndex * layerIndex);
-    vec2 basis = cos(angle - vec2(0.0, 1.6));
-    mat2 rotation = mat2(basis, basis.yx * vec2(-1.0, 1.0));
-    vec2 hatchUv =  rotation * fragCoord / sqrt(scaleFactor) * vec2(0.05 * uDensity, 1.0) * 1.3;
-    // 卷曲：把直排线揉弯（幅度与速度可调）
-    hatchUv += uCurl * vec2(sin(hatchUv.y * 0.45 + iTime*0.40*uJitterSpeed), cos(hatchUv.x * 0.40 + iTime*0.34*uJitterSpeed)) * 7.0;
-    vec4 randomHatch = pow(Random(hatchUv + vec2(sin(hatchUv.y), 0.0) + iTime*0.30*uJitterSpeed), vec4(1.0));
-    float wOff = (uWidth - 1.0) * 0.45;
-    float hatch = 1.0 - smoothstep(0.5 - wOff, 1.5 - wOff*0.6, randomHatch.x + brightness) - 0.3 * abs(randomDelta.z);
-    hatchMax = max(hatchMax, hatch);
-    return hatch;
-}
-
-void mainImage(out vec4 fragColor, in vec2 fragCoord)
-{
-    float scaleFactor = 2.0;
-    vec4 randomBase = Random(fragCoord * 1.2 / sqrt(scaleFactor) + iTime*0.30*uJitterSpeed);
-    vec4 randomDelta = randomBase - Random(fragCoord * 1.2 / sqrt(scaleFactor) + vec2(1.0, -1.0) * 1.5 + iTime*0.30*uJitterSpeed);
-    float edgeBrightness = 0.0;
-    int edgeLayers = 3;
-    for (int i = 0; i < edgeLayers; i++)
-    {
-        float fi = float(i) / float(edgeLayers - 1);
-        edgeBrightness += EdgeContribution(fragCoord, fi, edgeLayers, scaleFactor);
-    }
-    vec3 color = vec3(1.0) - 0.7 * edgeBrightness * (0.5 + 0.5 * randomBase.z) * 3.0 / float(edgeLayers);
-    color = clamp(color, 0.0, 1.0);
-    int hatchLayers = 5;
-    float hatchAccum = 0.0;
-    float hatchMax = 0.0;
-    float hatchCount = 0.0;
-    for (int i = 0; i < hatchLayers; i++)
-    {
-        float hatch = HatchLayer(fragCoord, i, scaleFactor, randomDelta, hatchMax);
-        hatchAccum += hatch;
-        hatchCount += 1.0;
-        float brightness = Luminance(fragCoord, vec2(0.0), 0.0, 1.0, scaleFactor) * 1.7;
-        if (float(i) > (1.0 - brightness) * float(hatchLayers) && i >= 2) break;
-    }
-    float hatchMix = clamp(mix(hatchAccum / hatchCount, hatchMax, 0.5), 0.0, 1.0);
-    color *= 1.0 - hatchMix;
-    fragColor = vec4(color, 1.0);
+    fragColor = vec4(col, fig);
 }</script>
 
 <script>
@@ -503,11 +482,8 @@ uniform float uCurl;        // 线条卷曲
 uniform float uShift;       // 线条移动
 uniform float uFigSize;     // 人形大小
 uniform float uEdge;        // 边缘强度
-uniform vec3  uCreaturePos; // 人形世界位置（方向键/WASD 控制）
-uniform vec2  uCrawlDir;    // 爬行方向
-uniform float uCrawl;       // 爬行强度（0.15 常态 .. 1 全力蠕动）
-uniform float uGaitT;       // 步态时间（步频随移动速度/焦躁提升）
-uniform float uTurn;        // 根须转体角（转向时整体转身）
+uniform vec4  uCreature;    // 人形状态：xz 位置 / 步态相位 / 行走混合
+uniform float uYaw;         // 人形朝向
 
 ` + user + `
 out vec4 outColor;
@@ -559,8 +535,8 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   };
 
   const passDefs = [
-    { name: "Buffer A", file: "bufferA-pure.frag", toScreen: false, channels: [null, null, null, null] },
-    { name: "Image",    file: "image-pure.frag",   toScreen: true,  channels: ["Buffer A", null, null, null] },
+    { name: "Buffer A", file: "bufferA-original.frag", toScreen: false, channels: [null, null, null, null] },
+    { name: "Image",    file: "image-original.frag",   toScreen: true,  channels: ["Buffer A", null, null, null] },
   ];
 
   // 优先从磁盘读取 .frag 文件（通过 http 打开时），file:// 下回退到内嵌副本
@@ -605,7 +581,7 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   // ---------- 状态 ----------
   const selRes = document.getElementById("selRes");
   const btnPause = document.getElementById("btnPause");
-  let simTime = 0, lastNow = 0, lastRender = 0, frame = 0, ping = 0, paused = false;
+  let simTime = 0, lastNow = 0, frame = 0, ping = 0, paused = false;
   let passes = null;
   let fpsAvg = 0;
   const mouse = [0, 0, 0, 0];
@@ -616,13 +592,12 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     ["uDensity",     "线条密度", 0.4, 2.6, 0.02, 1.0],
     ["uWidth",       "线条粗细", 0.4, 2.0, 0.02, 1.0],
     ["uJitter",      "抖动幅度", 0.0, 2.5, 0.05, 1.0],
-    ["uJitterSpeed", "抖动速度", 0.0, 20,  0.1,  1.0],
+    ["uJitterSpeed", "抖动速度", 0.0, 20.0, 0.05, 1.0],
     ["uCurl",        "线条卷曲", 0.0, 2.0, 0.05, 0.0],
     ["uShift",       "线条移动", 0.0, 2.0, 0.05, 0.0],
     ["uFigSize",     "人形大小", 0.4, 1.6, 0.02, 1.0],
-    ["uMoveSpeed",   "移动速度", 1.0, 12.0, 0.1, 3.0],
     ["uEdge",        "边缘强度", 0.2, 2.5, 0.05, 1.0],
-    ["fpsCap",       "帧数上限", 2, 120, 1, 60],
+    ["uWalkSpeed",   "走路速度", 0.3, 4.0, 0.05, 1.2],
   ];
   const param = {};
   PARAMS.forEach(p => param[p[0]] = p[5]);
@@ -648,32 +623,105 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   document.getElementById("btnPanel").addEventListener("click", () =>
     document.getElementById("panel").classList.toggle("hidden"));
 
-  // ---------- 人形位置（方向键/WASD 控制，贴地行走） ----------
-  const creaturePos = { x: 0, z: 0 };
-  const keys = new Set();
-  // 爬行状态：方向 / 强度 / 节肢步态相位
-  const crawl = { dirX: 0, dirZ: 1, inten: 0.15, heldT: 0, sway: 0, turn: 0 };
-  let gaitT = 0;
-
-  // 与着色器一致的 Terrain 高度（JS 版），让人形贴着地面移动
-  function jFract(x) { return x - Math.floor(x); }
-  function jHash(x, y) {
-    let px = jFract(x * 234.5), py = jFract(y * 435.6);
-    const d = px * (px + 34.5) + py * (py + 34.5);
-    px += d; py += d;
-    return jFract(px * py);
+  // ---------- 人物跟随光标：目标点平滑追踪 + 步态相位（走动在着色器内） ----------
+  const creature = { x: 0, z: 0, phase: 0, walk: 0, yaw: 0 };
+  let clickTarget = null;         // 点击设定的目的地（世界坐标 [x, z]）
+  window.__creature = creature;   // 调试用：可在控制台查看人物状态
+  let mouseSeen = false;
+  const CAM = { ro: [0, 5, -8], ta: [0, 4, 0] };
+  function norm3(v) { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0]/l, v[1]/l, v[2]/l]; }
+  function cross3(a, b) { return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+  function lerpAngle(a, b, t) {
+    let d = (b - a) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return a + d * t;
   }
-  function jNoise(x, y) {
-    const ix = Math.floor(x), iy = Math.floor(y);
-    let fx = x - ix, fy = y - iy;
-    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
-    const a = jHash(ix, iy), b = jHash(ix + 1, iy), c = jHash(ix, iy + 1), d = jHash(ix + 1, iy + 1);
-    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+  // 与着色器一致的地形函数（光标停在可见地面的哪块，脚就停在哪块）
+  function fract1(v) { return v - Math.floor(v); }
+  function hash2(px, py) {
+    let x = fract1(px*234.5), y = fract1(py*435.6);
+    const d = x*(x+34.5) + y*(y+34.5);
+    x += d; y += d;
+    return fract1(x*y);
   }
-  function sTerrain(x, z) {
-    let v = 0, amp = 0.5, px = x * 0.12, pz = z * 0.12;
-    for (let i = 0; i < 4; i++) { v += jNoise(px, pz) * amp; px *= 2; pz *= 2; amp *= 0.5; }
-    return v * 3.0 + Math.sin(x * 0.15) * 0.8 + Math.cos(z * 0.12) * 0.8;
+  function noise2(px, py) {
+    const ix = Math.floor(px), iy = Math.floor(py);
+    let fx = px-ix, fy = py-iy;
+    fx = fx*fx*(3-2*fx); fy = fy*fy*(3-2*fy);
+    const a = hash2(ix, iy), b = hash2(ix+1, iy), c = hash2(ix, iy+1), d = hash2(ix+1, iy+1);
+    return (a+(b-a)*fx) + (c-a)*fy*(1-fx) + (d-b)*fx*fy;
+  }
+  function fbm2(px, py) {
+    let v = 0, a = 0.5;
+    for (let i = 0; i < 4; i++) { v += noise2(px, py)*a; px *= 2; py *= 2; a *= 0.5; }
+    return v;
+  }
+  function terrainH(x, z) {
+    return fbm2(x*0.12, z*0.12)*3.0 + Math.sin(x*0.15)*0.8 + Math.cos(z*0.12)*0.8;
+  }
+  // 光标 → 可见地形表面的交点（射线步进 + 二分细化）
+  function cursorToTerrain(px, py) {
+    const w = canvas.width, h = canvas.height;
+    const f = norm3([CAM.ta[0]-CAM.ro[0], CAM.ta[1]-CAM.ro[1], CAM.ta[2]-CAM.ro[2]]);
+    const r = norm3(cross3([0, 1, 0], f));
+    const u = cross3(f, r);
+    const ux = (px - w/2) / h, uy = (py - h/2) / h;
+    let rd = [f[0]+ux*r[0]+uy*u[0], f[1]+ux*r[1]+uy*u[1], f[2]+ux*r[2]+uy*u[2]];
+    const l = Math.hypot(rd[0], rd[1], rd[2]);
+    rd = [rd[0]/l, rd[1]/l, rd[2]/l];
+    if (rd[1] >= -0.02) return null;   // 视线在地平线以上，交不到地面
+    let tPrev = 0.4, t = 0.4, hit = -1;
+    for (let i = 0; i < 100 && t < 45; i++) {
+      const x = CAM.ro[0]+rd[0]*t, y = CAM.ro[1]+rd[1]*t, z = CAM.ro[2]+rd[2]*t;
+      if (y < terrainH(x, z)) { hit = t; break; }
+      tPrev = t; t += 0.4;
+    }
+    if (hit < 0) return null;
+    let a = tPrev, b = hit;
+    for (let i = 0; i < 6; i++) {
+      const m = (a+b)/2;
+      const x = CAM.ro[0]+rd[0]*m, y = CAM.ro[1]+rd[1]*m, z = CAM.ro[2]+rd[2]*m;
+      if (y < terrainH(x, z)) b = m; else a = m;
+    }
+    return [CAM.ro[0]+rd[0]*b, 0, CAM.ro[2]+rd[2]*b];
+  }
+  // 光标 → 地面交点（y=1 平均地面），并钳制在靠近镜头的可见近带内：
+  // 人物跟随光标在近处任意移动（左右 + 前后），但永远不会走向画面深处
+  function cursorToGround(px, py) {
+    const w = canvas.width, h = canvas.height;
+    const f = norm3([CAM.ta[0]-CAM.ro[0], CAM.ta[1]-CAM.ro[1], CAM.ta[2]-CAM.ro[2]]);
+    const r = norm3(cross3([0, 1, 0], f));
+    const u = cross3(f, r);
+    const ux = (px - w/2) / h, uy = (py - h/2) / h;
+    let rd = [f[0]+ux*r[0]+uy*u[0], f[1]+ux*r[1]+uy*u[1], f[2]+ux*r[2]+uy*u[2]];
+    const l = Math.hypot(rd[0], rd[1], rd[2]);
+    rd = [rd[0]/l, rd[1]/l, rd[2]/l];
+    if (rd[1] >= -0.02) return null;   // 视线在地平线以上，交不到地面
+    const t = (1.0 - CAM.ro[1]) / rd[1];
+    let x = CAM.ro[0] + rd[0]*t;
+    let z = CAM.ro[2] + rd[2]*t;
+    z = Math.max(-4, Math.min(2, z));                // 深度钳制：中近景皆可达，但不走远
+    const xmax = Math.min(8, 0.85*(z+8));            // 视野宽度随深度变化
+    x = Math.max(-xmax, Math.min(xmax, x));
+    return [x, z];
+  }
+  function updateCreature(dt) {
+    dt = Math.min(dt, 0.05);
+    let tx = creature.x, tz = creature.z;
+    if (clickTarget) { tx = clickTarget[0]; tz = clickTarget[1]; }
+    // 点击行走：沿“当前位置 → 点击位置”的直线走过去，到达即停；光标移动不影响目的地
+    const dx = tx - creature.x, dz = tz - creature.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist > 0.08) {
+      const stepLen = Math.min(dist, param.uWalkSpeed * dt);        // 走路速度（滑杆可调）
+      creature.x += dx/dist*stepLen;
+      creature.z += dz/dist*stepLen;
+      creature.phase += stepLen * 4.6;                              // 步频随实际位移
+      creature.yaw = lerpAngle(creature.yaw, Math.atan2(-dx, -dz), 1 - Math.exp(-dt * 8));
+    }
+    const walking = dist > 0.08 ? 1 : 0;
+    creature.walk += (walking - creature.walk) * (1 - Math.exp(-dt * 6));
   }
 
   function resize() {
@@ -688,9 +736,8 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
 
   function restart() {
     simTime = 0; frame = 0; ping = 0;
-    creaturePos.x = 0; creaturePos.z = 0;
-    crawl.dirX = 0; crawl.dirZ = 1; crawl.inten = 0.15;
-    crawl.heldT = 0; crawl.sway = 0; crawl.turn = 0; gaitT = 0;
+    creature.x = 0; creature.z = 0; creature.phase = 0; creature.walk = 0;  // 人物回到画面中央
+    clickTarget = null;
     for (const d of passDefs) if (!d.toScreen) allocTargets(d.name);
   }
 
@@ -698,6 +745,7 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
 
   function render(dt) {
     resize();
+    updateCreature(dt);
     const w = canvas.width, h = canvas.height;
     const d = new Date();
     const date = [d.getFullYear(), d.getMonth() + 1, d.getDate(),
@@ -733,14 +781,8 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
         gl.uniform3fv(loc, new Float32Array(12)));
       setUnif(p, "iChannelTime", loc => gl.uniform1fv(loc, new Float32Array(4)));
       for (const [name] of PARAMS) setUnif(p, name, loc => gl.uniform1f(loc, param[name]));
-      setUnif(p, "uCreaturePos", loc =>
-        gl.uniform3f(loc, creaturePos.x,
-          sTerrain(creaturePos.x, creaturePos.z) + 0.02,
-          creaturePos.z));
-      setUnif(p, "uCrawlDir", loc => gl.uniform2f(loc, crawl.dirX, crawl.dirZ));
-      setUnif(p, "uCrawl", loc => gl.uniform1f(loc, crawl.inten));
-      setUnif(p, "uGaitT", loc => gl.uniform1f(loc, gaitT));
-      setUnif(p, "uTurn", loc => gl.uniform1f(loc, crawl.turn));
+      setUnif(p, "uCreature", loc => gl.uniform4f(loc, creature.x, creature.z, creature.phase, creature.walk));
+      setUnif(p, "uYaw", loc => gl.uniform1f(loc, creature.yaw));
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -749,61 +791,12 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   }
 
   function tick(now) {
-    requestAnimationFrame(tick);
-    // 帧数上限：低于上限时跳过本帧（动画时间仍按真实时间推进）
-    const cap = param.fpsCap || 60;
-    if (lastRender && now - lastRender < 1000 / cap - 2) return;
+    lastRaf = now;
     try {
       const dt = lastNow ? Math.min((now - lastNow) / 1000, 0.1) : 0;
-      lastNow = now; lastRender = now;
+      lastNow = now;
       if (dt > 0) fpsAvg = fpsAvg ? fpsAvg * 0.95 + (1 / Math.max(dt, 1e-4)) * 0.05 : 1 / Math.max(dt, 1e-4);
       if (!paused) simTime += dt;
-
-      // ---- WASD/方向键：下达爬行指令（抗拒式蠕动，非平移） ----
-      let dx = 0, dz = 0;
-      if (keys.has("ArrowLeft") || keys.has("KeyA")) dx -= 1;
-      if (keys.has("ArrowRight") || keys.has("KeyD")) dx += 1;
-      if (keys.has("ArrowUp") || keys.has("KeyW")) dz += 1;
-      if (keys.has("ArrowDown") || keys.has("KeyS")) dz -= 1;
-      const anyKey = (dx !== 0 || dz !== 0);
-      if (anyKey) {
-        crawl.heldT += dt;
-        const l = Math.hypot(dx, dz);
-        const k = Math.min(1, dt * 6);          // 转向响应更快
-        crawl.dirX += (dx / l - crawl.dirX) * k;
-        crawl.dirZ += (dz / l - crawl.dirZ) * k;
-        const fl = Math.hypot(crawl.dirX, crawl.dirZ) || 1;
-        crawl.dirX /= fl; crawl.dirZ /= fl;
-        crawl.inten = Math.min(1.0, crawl.inten + dt * (0.55 + crawl.heldT * 0.12));
-        gaitT += dt * (5.0 + crawl.inten * 3.5 + (param.uMoveSpeed || 3) * 0.3);
-      } else {
-        crawl.heldT = 0;
-        crawl.inten += (0.15 - crawl.inten) * Math.min(1, dt * 1.2);
-        gaitT += dt * 1.6;   // 停下后仍缓慢交替迈步（不会彻底静止）
-      }
-      // 转体：根须系统朝向随方向键明显转身（体朝向 = 前进方向）
-      const targetAng = Math.atan2(crawl.dirZ, crawl.dirX) - Math.PI / 2;
-      let dA = targetAng - crawl.turn;
-      while (dA > Math.PI) dA -= Math.PI * 2;
-      while (dA < -Math.PI) dA += Math.PI * 2;
-      crawl.turn += dA * Math.min(1, dt * 4.5);
-
-      // 节肢步态：迈步半周期身体快速前挪，另半周期停顿（不再后退）
-      const spd = (param.uMoveSpeed || 3) * 1.15 * (0.45 + 0.85 * crawl.inten);
-      const push = 0.25 + 0.75 * Math.pow(Math.abs(Math.sin(gaitT)), 2);
-      // 仅在按键时推进位置（无输入时根须只在原地细微颤动，不会自行漂移）
-      if (anyKey && push > 0.02) {
-        const swA = Math.sin(simTime * 1.9 + crawl.sway) * 0.14 * crawl.inten;
-        let fx2 = crawl.dirX - crawl.dirZ * swA;
-        let fz2 = crawl.dirZ + crawl.dirX * swA;
-        const fl2 = Math.hypot(fx2, fz2) || 1;
-        fx2 /= fl2; fz2 /= fl2;
-        creaturePos.x = Math.min(12, Math.max(-12, creaturePos.x + fx2 * spd * push * dt));
-        creaturePos.z = Math.min(16, Math.max(-8, creaturePos.z + fz2 * spd * push * dt));
-      }
-      // 路径偶尔偏摆（拒绝规整直线）
-      if (Math.random() < dt * 0.7) crawl.sway = Math.random() * Math.PI * 2;
-
       render(dt);
     } catch (e) {
       window.__pageError = (e && (e.message + "\n" + e.stack)) || String(e);
@@ -811,10 +804,17 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     statEl.textContent = paused ? "已暂停" :
       Math.round(canvas.width) + "×" + Math.round(canvas.height) + " · " + Math.round(fpsAvg) + " FPS";
     window.__status = { ok: true, hidden: document.hidden, paused, w: canvas.width, h: canvas.height,
-      fps: Math.round(fpsAvg), frame, error: window.__pageError || null,
-      pos: { x: +creaturePos.x.toFixed(2), z: +creaturePos.z.toFixed(2) },
-      crawl: { inten: +crawl.inten.toFixed(2), turn: +crawl.turn.toFixed(2) } };
+      fps: Math.round(fpsAvg), frame, error: window.__pageError || null };
+    requestAnimationFrame(tick);
   }
+
+  // rAF 被节流/遮挡时的兜底渲染，保证画面与行走逻辑不冻结
+  let lastRaf = 0;
+  setInterval(() => {
+    if (document.hidden || !passes) return;
+    const now = performance.now();
+    if (now - lastRaf > 120) tick(now);
+  }, 100);
 
   // ---------- 交互 ----------
   function updMouse(e, down) {
@@ -825,8 +825,12 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     mouse[0] = px; mouse[1] = py;
     if (down) { mouse[2] = px; mouse[3] = py; }
   }
-  canvas.addEventListener("mousedown", e => { dragging = true; updMouse(e, true); });
-  window.addEventListener("mousemove", e => { if (dragging) updMouse(e, true); });
+  canvas.addEventListener("mousedown", e => {
+    dragging = true; mouseSeen = true; updMouse(e, true);
+    const hit = cursorToGround(mouse[0], mouse[1]);
+    if (hit) clickTarget = hit;               // 点击处即为人物目的地
+  });
+  window.addEventListener("mousemove", e => { mouseSeen = true; updMouse(e, dragging); });
   window.addEventListener("mouseup", () => {
     if (dragging) { dragging = false; mouse[2] = -Math.abs(mouse[2]); mouse[3] = -Math.abs(mouse[3]); }
   });
@@ -842,14 +846,10 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     else document.documentElement.requestFullscreen();
   });
   selRes.addEventListener("change", resize);
-  const MOVE_KEYS = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "KeyW", "KeyA", "KeyS", "KeyD"];
   window.addEventListener("keydown", e => {
-    if (MOVE_KEYS.includes(e.code)) { e.preventDefault(); keys.add(e.code); return; }
     if (e.code === "Space") { e.preventDefault(); togglePause(); }
     if (e.code === "KeyR") restart();
   });
-  window.addEventListener("keyup", e => keys.delete(e.code));
-  window.addEventListener("blur", () => keys.clear());
 
   // ---------- 启动 ----------
   loadUserCode().then(src => {

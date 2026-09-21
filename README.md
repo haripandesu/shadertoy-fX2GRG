@@ -35,8 +35,10 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `index.html` | 原版复刻：WebGL2 运行环境 + 内嵌原作着色器副本 + 控制条 |
-| `bufferA-original.frag` / `image-original.frag` | 原作源码（光线步进 / 边缘排线），index.html 优先加载 |
+| `index.html` | 入口页：自动跳转到纯原版 `original-pure.html` |
+| `original-pure.html` | 纯原版（默认打开的版本）：根须生物 + 参数面板 + WASD 爬行 |
+| `original.html` | 原版复刻（人形·参数版）：WebGL2 运行环境 + 内嵌原作着色器副本 + 控制条 |
+| `bufferA-original.frag` / `image-original.frag` | 原作源码（光线步进 / 边缘排线），original.html 优先加载 |
 | `art.html` | 绘画版：铅笔圈线改编 + 右上角参数面板 |
 | `bufferA.frag` / `image.frag` | 绘画版着色器源码（art.html 优先加载） |
 | `passes.json` | 从原页面导出的 Pass/通道连接信息 |
