@@ -40,7 +40,7 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `index.html` | 入口页：自动跳转到纯原版 `original-pure.html` |
+| `index.html` | 入口页：自动跳转到 3D 视角版 `scene3d.html`（默认打开的版本） |
 | `original-pure.html` | 纯原版（默认打开的版本）：根须生物 + 参数面板 + WASD 爬行 |
 | `original.html` | 原版复刻（人形·参数版）：WebGL2 运行环境 + 内嵌原作着色器副本 + 控制条 |
 | `scene3d.html` | 3D 视角版：素描风场景 + 鼠标拖拽旋转视角 / 滚轮缩放 |
