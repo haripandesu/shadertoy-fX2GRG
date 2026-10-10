@@ -221,6 +221,13 @@ float sdSeg(vec3 p, vec3 a, vec3 b)
 // 部分根拱起地表形成剪影；整体由 iTime 驱动持续细微蠕动。
 float RootCluster(vec3 p)
 {
+    // 地面贴合（穿模修复）：p.xz 此处仍是世界水平偏移/uFigSize。取采样点
+    // 所在世界位置与生物中心的地形高度差，把采样点沿 y 反向平移，
+    // 使身体逐点趴附地表——跨起伏时不再陷入地面。
+    // 穿透白名单：排线/散开粒子允许穿透（不做碰撞）；地面与实体不允许。
+    float gh = Terrain(uCreaturePos.xz + p.xz * uFigSize) - (uCreaturePos.y - 0.02);
+    p.y -= gh / uFigSize;
+
     // 转体：身体朝向随方向键转动（配合迈步完成转身）
     float ca = cos(uTurn), sa = sin(uTurn);
     vec2 rot = mat2(ca, sa, -sa, ca) * p.xz;
@@ -238,7 +245,7 @@ float RootCluster(vec3 p)
         vec3 c = vec3(sin(fs*2.3 + uGaitT*0.4)*0.035*(0.4 + uCrawl),
                       0.34 + wave*(0.02 + 0.035*uCurl),
                       -0.62 + fs*0.30);
-        float rr = 0.11 + 0.07*sin(fs/5.0*3.1416);
+        float rr = 0.05 + 0.10 * pow(fs / 5.0, 0.85);   // 尾细头粗：fs=5 为头部端（P0-2 唯一前向）
         d = min(d, sdSeg(p, prev, c) - (prevR + rr)*0.5);
         d = min(d, length(p - c) - rr);
         // ---- 每节两侧的腿：相位交错，轮流抬起前摆（足部动作明显） ----
@@ -263,18 +270,137 @@ float RootCluster(vec3 p)
         prev = c; prevR = rr;
     }
 
+    // 头部：局部 +z 端的膨大头球——主体唯一前向的视觉标识（P0-2）
+    d = min(d, length(p - vec3(0.0, 0.36, 1.10)) - 0.16);
+
     // 揉弯：噪声轻微侵蚀距离（轮廓破碎毛躁）
     float wig = Noise(p.xz*6.5 + vec2(0.0, iTime*0.25)) - 0.5;
     d -= wig*0.045;
     return d;
 }
 
+// ---------- 幻象（假目标）：从地面升起的盘绕烟雾线柱 ----------
+// 形态对应参考图（烟雾线条效果）：像毛线一样盘绕弯曲的线圈自地表向上升起——
+// 底部是一团纠结的线圈结，往上环圈逐节升高、渐细渐疏，顶端散出断续线缕；
+// 全部为铅笔质感的黑色圈圈线条：无白色、无固定轮廓、无实心黑块。
+// 原地抖动循环严格对应手绘序列帧节奏：6 帧 × 170ms（循环 1.02s），
+// 四组关键帧参数（风扰 / 扭转 / 松紧 / 伸缩）以 smoothstep 缓动插值，
+// 帧过渡柔和无硬切；所有形变绕地表锚点进行，幻象整体不位移。
+// 形变与全局排线抖动（uJitter/uJitterSpeed）完全解耦，仅由自身循环时钟驱动。
+const float PH_LOOP = 1.02;                                                // 循环时长（秒）＝6帧×170ms
+const float KF_GUST[6]  = float[6](0.35, 0.55, 0.20, 0.50, 0.30, 0.60);    // 风扰幅度（烟柱歪斜）
+const float KF_TWIST[6] = float[6](0.00, 0.40,-0.35, 0.55,-0.45, 0.30);    // 线圈扭转（弧度）
+const float KF_LOOSE[6] = float[6](1.00, 1.10, 0.96, 1.06, 1.12, 1.02);    // 线圈松紧
+const float KF_RISE[6]  = float[6](1.00, 0.97, 1.05, 0.96, 1.03, 1.00);    // 纵向伸缩
+
+float Phantom(vec3 p, int i)
+{
+    vec4 A = uPhantomA[i];   // xyz = 地表锚点, w = 淡入可见度（0~1）
+    vec4 B = uPhantomB[i];   // x = 形态种子, y = 抖动循环相位偏移, z = 线柱尺度, w = 风向方位角
+    float dis = uPhantomDis[i];   // 消散进度（0 完整 → 1 完全消散），抵达触发后由页面平滑推进
+    float S = max(B.z, 1.0) * max(uPhantomSize, 0.05);
+    vec3 q = p - A.xyz;
+    // 外包快速剔除（含风扰/消散弥散与断裂侵蚀余量），远处光线不付出细算代价
+    float reach = S * (1.1 + 0.9 * dis);
+    if (dot(q.xz, q.xz) > reach*reach || q.y < -0.1*S || q.y > S*(1.25 + 0.45*dis))
+        return 1e9;
+
+    // ---- 手绘序列帧关键帧插值（smoothstep 缓动，帧过渡柔和） ----
+    float tt = fract(iTime / PH_LOOP + B.y) * 6.0;
+    int k0 = int(floor(tt));
+    int k1 = (k0 < 5) ? (k0 + 1) : 0;
+    float ff = smoothstep(0.0, 1.0, fract(tt));
+    float gust  = mix(KF_GUST[k0],  KF_GUST[k1],  ff) * uPhantomJitter;
+    float twist = mix(KF_TWIST[k0], KF_TWIST[k1], ff) * uPhantomJitter;
+    float loose = 1.0 + (mix(KF_LOOSE[k0], KF_LOOSE[k1], ff) - 1.0) * uPhantomJitter;
+    float rise  = 1.0 + (mix(KF_RISE[k0],  KF_RISE[k1],  ff) - 1.0) * uPhantomJitter;
+
+    // 单位线柱空间（尺度 S → 1，地面 y=0）
+    q /= S;
+    // 纵向伸缩：整柱轻微起伏（锚点贴地不动，不是位移）
+    q.y /= max(rise, 0.8);
+    // 风扰：风向固定（逐实例种子），越高的线圈被吹得越远——烟雾感
+    vec2 wind = vec2(cos(B.w), sin(B.w));
+    float hgt = max(q.y, 0.0);
+    q.xz -= wind * (gust * 0.28 + 0.12) * pow(hgt, 1.4);
+
+    // ---- 消散形变：线圈松解后化作轻薄烟雾顺风向上升、向外弥散 ----
+    // 全部随消散进度 dis 平滑推进（页面端 smoothstep），无硬跳变
+    if (dis > 0.001) {
+        float d2 = dis * dis;
+        q.xz += wind * d2 * (0.28 + 0.42 * hgt);                                    // 顺风带走，越高飘越远
+        q.xz += normalize(q.xz + vec2(0.0013, 0.0011)) * dis * 0.32 * (0.35 + hgt); // 径向向外弥散
+        q.y  += dis * 0.28 * hgt;                                                   // 线缕缓缓上升
+    }
+
+    float d = 1e9;
+    // ---- 盘绕烟柱：5 节自下而上的螺旋线圈 + 顶端断续线缕 ----
+    // 每节线圈用 4 段胶囊近似螺旋，绕竖轴盘绕同时缓缓上升（毛线缠绕感）
+    for (int k = 0; k < 5; k++)
+    {
+        float fk = float(k);
+        float h    = 0.10 + fk * 0.17;                                   // 节高
+        float cr   = (0.29 - fk * 0.026) * loose
+                   * (0.85 + 0.30 * Hash(vec2(B.x, fk * 2.7 + 1.0)))
+                   * (1.0 + dis * 0.85);                                 // 消散：线圈松解放大
+        vec3  c    = vec3((Hash(vec2(B.x, fk * 2.7 + 2.0)) - 0.5) * 0.26,
+                          h,
+                          (Hash(vec2(B.x, fk * 2.7 + 3.0)) - 0.5) * 0.26);
+        float ph   = Hash(vec2(B.x, fk * 2.7 + 4.0)) * 6.2831 + twist * (0.5 + fk * 0.22);
+        float turns= 1.1 + Hash(vec2(B.x, fk * 2.7 + 5.0)) * 0.7;
+        float rad  = (0.012 + Hash(vec2(B.x, fk * 2.7 + 6.0)) * 0.007)
+                   * (1.0 - dis * 0.3);                                  // 消散：线条渐渐变细
+        float yr   = 0.09 + Hash(vec2(B.x, fk * 2.7 + 7.0)) * 0.07;      // 线圈爬升
+        vec3 prev = c + vec3(cr * cos(ph), 0.0, cr * sin(ph));
+        for (int s = 0; s < 4; s++)
+        {
+            float fs = (float(s) + 1.0) / 4.0;
+            float ang = ph + fs * turns * 6.2831;
+            vec3 nxt = c + vec3(cr * cos(ang), fs * yr, cr * sin(ang));
+            d = min(d, Capsule(q, prev, nxt, rad));
+            prev = nxt;
+        }
+    }
+    // 顶端线缕：2 根随风飘散的弯折细线
+    for (int k = 0; k < 2; k++)
+    {
+        float fk = float(k + 5);
+        float az  = Hash(vec2(B.x, fk * 2.7 + 1.0)) * 6.2831;
+        vec3  a   = vec3(cos(az) * 0.10, 0.80 + fk * 0.05, sin(az) * 0.10);
+        vec3  m   = a + vec3(wind.x * 0.07 + (Hash(vec2(B.x, fk * 2.7 + 2.0)) - 0.5) * 0.10,
+                             0.06,
+                             wind.y * 0.07 + (Hash(vec2(B.x, fk * 2.7 + 3.0)) - 0.5) * 0.10);
+        vec3  b   = m + vec3(wind.x * 0.10 + (Hash(vec2(B.x, fk * 2.7 + 4.0)) - 0.5) * 0.12,
+                             0.05 + Hash(vec2(B.x, fk * 2.7 + 5.0)) * 0.05,
+                             wind.y * 0.10 + (Hash(vec2(B.x, fk * 2.7 + 6.0)) - 0.5) * 0.12);
+        d = min(d, Capsule(q, a, m, 0.010));
+        d = min(d, Capsule(q, m, b, 0.008));
+    }
+    // 断裂侵蚀：静态噪声把线条打断成铅笔断续炭痕；消散时侵蚀频率增大、深度收敛——
+    // 碎片碎得更细如烟雾屑（不结成块），断裂纹样随进度向上爬升，仿佛被上升气流带走，
+    // 残留碎屑再由渲染端透明度淡出抹去
+    // （逐实例种子；无时间项——外形变化只来自关键帧与消散进度）
+    float n = Noise(q.xy * (9.5 + 30.0 * dis) + vec2(B.x * 3.1, -q.z * 8.6 + B.x * 5.3 - dis * 5.0));
+    d -= (n - 0.5) * (0.028 + 0.14 * dis);
+
+    return d * S * min(rise, 1.0);
+}
+
 vec2 Map(vec3 p)
 {
     float g = p.y - Terrain(p.xz);
     float c = RootCluster((p - uCreaturePos)/uFigSize)*uFigSize;
-    if(c < g) return vec2(c,1.);
-    return vec2(g,2.);
+    float best = min(c, g);
+    float id = (c < g) ? 1.0 : 2.0;
+    for (int i = 0; i < 3; i++)
+    {
+        if (uPhantomA[i].w > 0.001)
+        {
+            float t = Phantom(p, i);
+            if (t < best) { best = t; id = 3.0; }
+        }
+    }
+    return vec2(best, id);
 }
 
 #define ZERO (min(iFrame,0))
@@ -297,9 +423,10 @@ vec2 Raymarching(vec3 ro, vec3 rd)
     {
         vec3 p = ro + rd*d;
         vec2 h = Map(p);
-        d += h.x;
+        // 幻象 SDF 带噪声侵蚀、非严格距离场，临近时缩短步长防穿透
+        d += h.x * (h.y > 2.5 ? 0.2 : 1.0);
         m = h.y;
-        if(abs(h.x)<0.001 || d>120.)
+        if(abs(h.x) < (h.y > 2.5 ? 0.03 : 0.001) || d>160.)
             break;
     }
     return vec2(d,m);
@@ -334,7 +461,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     vec3 col = mix(vec3(0.02,0.03,0.08),vec3(0.4,0.05,0.08),uv.y*0.5+0.5);
     vec2 muv = uv - vec2(0.45,0.25);
     vec2 hit = Raymarching(ro,rd);
-    if(hit.x < 120.)
+    if(hit.x < 160.)
     {
         vec3 p = ro + rd*hit.x;
         vec3 n = Normal(p);
@@ -353,18 +480,157 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
             base += diff*0.25;
             col = base;
         }
-        else
+        else if(hit.y < 2.5)
         {
             vec3 ground = mix(vec3(0.8,0.2,0.3), vec3(0.1,0.8,1.0), Fbm(p.xz*.1));
             ground *= 0.25 + diff*.75;
+            // ---- 行走痕迹：足迹墨迹压暗地表。只在地面分支采样，采样点即地表
+            // 命中点——痕迹贴着地形起伏渲染，不悬浮不穿模；墨迹自带炭纹留白，
+            // 排线风格化仍由 Image pass 完成，与全局炭笔质感统一 ----
+            vec2 tuv = (p.xz - uTrailOrigin) / uTrailWindow;
+            if (all(greaterThan(tuv, vec2(0.001))) && all(lessThan(tuv, vec2(0.999))))
+            {
+                float tInk = texture(uTrailTex, tuv).r;
+                vec2  bm = min(tuv, 1.0 - tuv);
+                float bMask = smoothstep(0.0, 0.06, min(bm.x, bm.y));   // 纹理窗口边缘渐隐，绝不硬切
+                // 参考图实测：拖痕平均压暗约 2 成、核心线约 4 成——系数 0.45、
+                // 上限 0.62 标定出"深核心 + 羽化毛边"的剖面（黑度仍透排线）
+                ground *= 1.0 - clamp(0.45 * uTrailInk * tInk * bMask, 0.0, 0.62);
+            }
             col = ground;
+        }
+        else
+        {
+            // 幻象：铅笔质感的黑色盘绕线圈（无白色、无实心黑块），
+            // 墨色深浅起伏让排线透出；消散进度后段透明度平滑降低（先形变后淡出）
+            float phFade = 0.0, phBest = 1e9;
+            int phIdx = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                float dd = length(p - uPhantomA[i].xyz);
+                if (dd < phBest) { phBest = dd; phFade = uPhantomA[i].w; phIdx = i; }
+            }
+            // 淡出贯穿整个 3 秒消散：透明度按 1.6 次幂加速衰减——碎片随碎化同步变淡，
+            // 中段已半透明、末段无痕消隐，不再是浓黑显眼的残块
+            float vis = phFade * pow(1.0 - smoothstep(0.0, 1.0, uPhantomDis[phIdx]), 1.6);
+            float streak = Fbm(vec2(p.x*2.2 - p.z*1.1, p.y*0.85));
+            vec3 ink = vec3(0.030, 0.022, 0.036) * (0.45 + 0.95 * streak);
+            ink = mix(ink, vec3(0.45, 0.41, 0.49), 0.55 * uPhantomDis[phIdx]);  // 墨色随消散提浅为灰烟色
+            col = mix(col, ink, vis * 0.8 * uPhantomInk);
         }
         float fog = exp(-hit.x*.03);
         vec3 fogCol = mix(vec3(0.6,0.2,0.3), vec3(0.1,0.6,1.0), uv.y + 0.3);
     }
     col = pow(col,vec3(.75));
     fragColor = vec4(col,1);
-}</script>
+}
+</script>
+
+<script type="x-shader/x-fragment" id="shader-trail">// ============ 行走痕迹 pass：足迹盖印 + 逐像素寿命衰减（ping-pong） ============
+// R 通道 = 墨量（0~1 封顶，新足迹叠加累加——交叉重叠处排线自然加深，互不擦除）；
+// G/B 通道 = 16 位打包的"距上次盖印秒数"。每帧先把旧迹按寿命包络衰减
+// （留存期内 1:1 完整保留，期满后 smoothstep 缓淡归零，帧率无关、无硬切），
+// 再把页面端按行进距离投递的足迹队列盖印进纹理（墨量累加、重置寿命）。
+// 足迹形状：沿行进方向拉长的宽墨渍（重叠成参考图的连续拖痕）+ 噪声啃出的
+// 撕扯毛边 + 内部横向炭纹留白，纹样全部以世界坐标为锚（同一路径上稳定不闪）；炭笔排线质感交给
+// Buffer A 压暗 + Image pass 风格化完成，与全局画面统一。
+uniform sampler2D uPrevTrail;
+uniform vec2  uOriginPrev;   // 上一帧纹理 uv(0,0) 的世界坐标
+uniform vec2  uOriginNow;    // 本帧纹理 uv(0,0) 的世界坐标（窗口跟随主体滚动）
+uniform float uWindow;       // 纹理覆盖的世界边长
+uniform float uDt;           // 真实帧间隔（不经帧率钳制，寿命按墙钟推进）
+uniform float uLife;         // 痕迹留存时间（面板滑杆，秒）
+uniform float uTrailWidth;   // 痕迹粗细（面板滑杆）
+uniform int   uStampCount;   // 本帧盖印数
+uniform vec4  uStamp[8];     // xy = 地表世界坐标, z = 行进朝向角, w = 墨量
+
+float Hash(vec2 p)
+{
+    p = fract(p*vec2(234.5,435.6));
+    p += dot(p,p+34.5);
+    return fract(p.x*p.y);
+}
+
+float Noise(vec2 p)
+{
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    float a = Hash(i);
+    float b = Hash(i+vec2(1,0));
+    float c = Hash(i+vec2(0,1));
+    float d = Hash(i+vec2(1,1));
+    vec2 u = f*f*(3.-2.*f);
+    return mix(a,b,u.x) + (c-a)*u.y*(1.-u.x) + (d-b)*u.x*u.y;
+}
+
+// 寿命 16 位打包（0~64s，精度约 1ms）；Buffer A 只读 R 通道，互不干扰
+const float AGE_MAX = 64.0;
+vec2 encAge(float a)
+{
+    float v = clamp(a / AGE_MAX, 0.0, 1.0) * 65535.0;
+    float hi = floor(v / 256.0);
+    return vec2(hi, v - hi * 256.0) / 255.0;
+}
+float decAge(vec2 gb)
+{
+    return (floor(gb.x * 255.0 + 0.5) * 256.0 + floor(gb.y * 255.0 + 0.5)) / 65535.0 * AGE_MAX;
+}
+
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    vec2 uv = fragCoord / iResolution.xy;
+    vec2 world = uOriginNow + uv * uWindow;
+    vec2 puv = (world - uOriginPrev) / uWindow;   // 本像素世界位置在上一帧纹理中的位置
+
+    float ink = 0.0;
+    float age = AGE_MAX;
+    if (all(greaterThan(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+    {
+        vec4 prev = texture(uPrevTrail, puv);
+        ink = prev.r;
+        age = decAge(prev.gb);
+    }
+
+    // ---- 寿命衰减：留存期内完整保留（包络=1），期满 smoothstep 缓淡归零 ----
+    const float FADE = 4.0;
+    age += uDt;
+    ink *= 1.0 - smoothstep(uLife, uLife + FADE, age);
+    if (age >= uLife + FADE) ink = 0.0;
+
+    // ---- 盖印本帧拖痕（参考图：虫体拖出的连续宽墨渍，不是离散脚印） ----
+    float add = 0.0;
+    float hit = 0.0;
+    for (int i = 0; i < 8; i++)
+    {
+        if (i >= uStampCount) break;
+        vec4 s = uStamp[i];
+        vec2 d = world - s.xy;
+        float ca = cos(s.z), sa = sin(s.z);
+        vec2 l = mat2(ca, -sa, sa, ca) * d;          // x = 横向, y = 沿行进方向
+        // 墨渍：沿行进方向拉长，半径逐印微随机（手绘宽窄不一）；
+        // 宽度约取虫体一半——参考图的拖痕远窄于虫体投影
+        float r = 0.30 * uTrailWidth * (0.82 + 0.36 * Hash(s.xy + vec2(7.1, 3.7)));
+        vec2 el = vec2(l.x * 1.12, l.y * 0.78);
+        float sd = length(el) - r;
+        // 撕扯毛边：粗颗粒噪声啃出破碎轮廓 + 细颗粒尘雾（世界锚定，盖印后稳定）
+        sd += (Noise(world * 3.2 + s.xy * 0.11) - 0.5) * 0.34 * r;
+        sd += (Noise(world * 13.0 + s.xy * 0.31) - 0.5) * 0.14 * r;
+        float mask = smoothstep(0.16, -0.05, sd);
+        if (mask > 0.001)
+        {
+            // 内部炭纹：横亘行进方向的擦痕留白（核心仍近实心，重叠处自然加深）
+            float hn = Noise(l * (11.0 / uTrailWidth) + s.xy * 1.7);
+            float strokes = 0.72 + 0.28 * sin(l.x * (9.0 / uTrailWidth) + hn * 6.0 + s.z * 4.0);
+            add += s.w * mask * mix(1.0, strokes, 0.30);
+            hit = max(hit, mask);
+        }
+    }
+    ink = min(1.0, ink + add);
+    if (hit > 0.0) age = 0.0;   // 新墨覆盖处寿命重置
+
+    fragColor = vec4(ink, encAge(min(age, AGE_MAX)), 1.0);
+}
+</script>
 
 <!-- ============ Image：边缘 + 排线风格化后处理（与 Shadertoy 原作逐字一致） ============ -->
 <script type="x-shader/x-fragment" id="shader-image">float Hash(vec2 p)
@@ -538,6 +804,17 @@ uniform float uCamYaw;      // 相机方位角（鼠标拖拽旋转）
 uniform float uCamPitch;    // 相机俯仰角（鼠标拖拽旋转）
 uniform float uCamDist;     // 相机距离（滚轮缩放）
 uniform vec3  uCamTarget;   // 相机注视点（跟随根须生物）
+uniform vec4  uPhantomA[3];   // 幻象实例：xyz = 地表锚点，w = 淡入可见度（0~1）
+uniform vec4  uPhantomB[3];   // 幻象实例：x = 形态种子，y = 抖动循环相位偏移，z = 线柱尺度，w = 风向方位角
+uniform float uPhantomSize;   // 幻象大小总倍率（面板滑杆）
+uniform float uPhantomInk;    // 幻象墨色深浅总倍率（面板滑杆）
+uniform float uPhantomJitter; // 幻象抖动幅度总倍率（面板滑杆）
+uniform float uPhantomDis[3];   // 幻象消散进度（0 完整 → 1 完全消散）
+uniform sampler2D uTrailTex;  // 行走痕迹纹理（Trail pass 维护；R=墨量）
+uniform vec2  uTrailOrigin;   // 痕迹纹理 uv(0,0) 的世界坐标（窗口跟随主体滚动）
+uniform float uTrailWindow;   // 痕迹纹理覆盖的世界边长
+uniform float uTrailInk;      // 痕迹深浅（面板滑杆，地表压暗总倍率）
+// 注：uLife/uTrailWidth/uStampCount/uStamp 为 Trail pass 专属，声明在 trail.frag 内
 
 ` + user + `
 out vec4 outColor;
@@ -586,6 +863,7 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   const EMBEDDED = {
     "Buffer A": document.getElementById("shader-bufferA").textContent,
     "Image": document.getElementById("shader-image").textContent,
+    "Trail": document.getElementById("shader-trail").textContent,
   };
 
   const passDefs = [
@@ -603,6 +881,13 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
         if (r.ok) src = await r.text();
       } catch (e) { /* file:// 下忽略，用内嵌副本 */ }
       out[d.name] = src;
+    }
+    {
+      out["Trail"] = EMBEDDED["Trail"];
+      try {
+        const r = await fetch("trail.frag", { cache: "no-store" });
+        if (r.ok) out["Trail"] = await r.text();
+      } catch (e) { /* file:// 下忽略，用内嵌副本 */ }
     }
     return out;
   }
@@ -632,6 +917,146 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     RT[name] = t;
   }
 
+  // ================== 行走痕迹：足迹盖印纹理（ping-pong + 逐像素寿命） ==================
+  // 纹理 R 通道存墨量、G/B 存 16 位寿命，由 Trail pass 每帧推进（留存期满后缓淡）；
+  // 窗口随主体滚动（原点按整纹素量化，避免反复重采样发糊），Buffer A 地表采样压暗。
+  const TRAIL = {
+    RES: 2048,           // 痕迹纹理分辨率（正方形）
+    WINDOW: 160,         // 纹理覆盖的世界边长（±80，跟随主体）
+    STEP: 0.26,          // 盖印间距（世界单位）——密叠成参考图的连续拖痕
+    MAXQ: 8,             // 单帧盖印上限（与 shader 循环一致；6fps×极速也够用）
+    FADE_SLOPE: 0.06,    // 纹理窗口边缘渐隐带宽（比例）
+    queue: [],           // 本帧待盖印足迹 {x,z,ang,str}
+    origin: { x: 0, z: 0 },       // 当前纹理 uv(0,0) 的世界坐标
+    originPrev: { x: 0, z: 0 },   // 上一帧的窗口原点（滚动量据此换算）
+    last: null,          // 上一枚足迹落点（按行进距离盖印的锚点）
+    alt: 1,              // 左右交替偏移（双足交叠的辫状拖痕）
+  };
+  let trailPass = null, trailPing = 0, trailCurrentTex = null, RTtrail = null;
+
+  function trailOriginFor() {
+    const texel = TRAIL.WINDOW / TRAIL.RES;
+    const q = v => Math.floor(v / texel) * texel;
+    return { x: q(creaturePos.x - TRAIL.WINDOW / 2), z: q(creaturePos.z - TRAIL.WINDOW / 2) };
+  }
+
+  function allocTrail() {
+    if (RTtrail) for (const k of [0, 1]) {
+      gl.deleteTexture(RTtrail[k].tex); gl.deleteFramebuffer(RTtrail[k].fbo);
+    }
+    const t = {};
+    for (const k of [0, 1]) {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, TRAIL.RES, TRAIL.RES, 0,
+                    gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      t[k] = { tex, fbo };
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    RTtrail = t;
+    trailPing = 0; trailCurrentTex = t[0].tex;
+    TRAIL.queue.length = 0; TRAIL.last = null;
+    TRAIL.origin = trailOriginFor();
+    TRAIL.originPrev = { x: TRAIL.origin.x, z: TRAIL.origin.z };
+  }
+
+  // Trail pass 每帧最先跑：衰减旧迹 + 盖印新足迹（画布分辨率无关，固定 RES²）
+  function renderTrail(rawDt) {
+    if (!trailPass || !RTtrail) return;
+    const src = RTtrail[trailPing], dst = RTtrail[1 - trailPing];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, dst.fbo);
+    gl.viewport(0, 0, TRAIL.RES, TRAIL.RES);
+    gl.useProgram(trailPass.prog);
+    // 关键：trail 程序的 iResolution 必须是纹理分辨率。此前从未设置（恒为 0），
+    // 着色器 uv = fragCoord/0 = NaN，导致旧迹读不回、盖印 mask 恒 NaN——
+    // 痕迹纹理永远空白且无任何 GL 报错（"看不见痕迹"的根因）
+    if (trailPass.u.iResolution)
+      gl.uniform3f(trailPass.u.iResolution, TRAIL.RES, TRAIL.RES, TRAIL.RES / TRAIL.RES);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    gl.uniform1i(trailPass.u.uPrevTrail, 0);
+    gl.uniform2f(trailPass.u.uOriginPrev, TRAIL.originPrev.x, TRAIL.originPrev.z);
+    gl.uniform2f(trailPass.u.uOriginNow, TRAIL.origin.x, TRAIL.origin.z);
+    gl.uniform1f(trailPass.u.uWindow, TRAIL.WINDOW);
+    gl.uniform1f(trailPass.u.uDt, paused ? 0 : rawDt);   // 暂停时寿命一并冻结
+    gl.uniform1f(trailPass.u.uLife, param.uTrailLife);
+    gl.uniform1f(trailPass.u.uTrailWidth, param.uTrailWidth);
+    const n = Math.min(TRAIL.MAXQ, TRAIL.queue.length);
+    gl.uniform1i(trailPass.u.uStampCount, n);
+    if (n > 0) {
+      const arr = trailUniformBuf;
+      for (let i = 0; i < n; i++) {
+        const s = TRAIL.queue[i];
+        arr[i * 4] = s.x; arr[i * 4 + 1] = s.z; arr[i * 4 + 2] = s.ang; arr[i * 4 + 3] = s.str;
+      }
+      gl.uniform4fv(trailPass.u.uStamp, arr);
+    }
+    gl.bindVertexArray(vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    trailPing = 1 - trailPing;
+    trailCurrentTex = dst.tex;
+    TRAIL.queue.length = 0;
+  }
+  const trailUniformBuf = new Float32Array(TRAIL.MAXQ * 4);
+
+  // 调试钩子：只读痕迹纹理统计（验收/排障用，不影响渲染）
+  window.__trailProbe = function (x0, y0, w, h) {
+    if (!RTtrail) return null;
+    x0 = Math.max(0, x0 | 0); y0 = Math.max(0, y0 | 0);
+    w = Math.min(w | 0, TRAIL.RES - x0); h = Math.min(h | 0, TRAIL.RES - y0);
+    const px = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, RTtrail[trailPing].fbo);
+    gl.readPixels(x0, y0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let maxR = 0, sumR = 0, lit = 0;
+    for (let i = 0; i < w * h; i++) { const r = px[i * 4]; sumR += r; if (r > 8) lit++; if (r > maxR) maxR = r; }
+    return { maxR: +(maxR / 255).toFixed(3), meanR: +(sumR / (w * h) / 255).toFixed(4), lit,
+             region: { x0, y0, w, h }, origin: { x: TRAIL.origin.x, z: TRAIL.origin.z },
+             window: TRAIL.WINDOW, pos: { x: +creaturePos.x.toFixed(2), z: +creaturePos.z.toFixed(2) } };
+  };
+  // 调试钩子：trail 程序全部 uniform 当前值 + GL 错误码
+  window.__glInfo = function () {
+    if (!trailPass) return null;
+    const o = { uniforms: {} };
+    for (const k in trailPass.u) o.uniforms[k] = gl.getUniform(trailPass.prog, trailPass.u[k]);
+    o.err = gl.getError();
+    o.queueLen = TRAIL.queue.length;
+    return o;
+  };
+
+  // 按行进距离盖印：每前进 STEP 落一枚足迹（左右交替横向偏移 + 随机大小/朝向），
+  // 停止移动即不再新增（moved=false 时重置锚点，原地蠕动不画痕）
+  function updateTrailEmit(moved) {
+    TRAIL.originPrev = TRAIL.origin;
+    TRAIL.origin = trailOriginFor();
+    if (!moved) { TRAIL.last = null; return; }
+    if (!TRAIL.last) TRAIL.last = { x: creaturePos.x, z: creaturePos.z };
+    let dx = creaturePos.x - TRAIL.last.x, dz = creaturePos.z - TRAIL.last.z;
+    let dist = Math.hypot(dx, dz);
+    let guard = 0;
+    while (dist >= TRAIL.STEP && TRAIL.queue.length < TRAIL.MAXQ && guard++ < 16) {
+      const inv = 1 / dist;
+      const dirX = dx * inv, dirZ = dz * inv;
+      const off = TRAIL.alt * (0.07 + Math.random() * 0.06);   // 左右交替的轻微错位
+      TRAIL.alt = -TRAIL.alt;
+      const px = TRAIL.last.x + dirX * TRAIL.STEP - dirZ * off;
+      const pz = TRAIL.last.z + dirZ * TRAIL.STEP + dirX * off;
+      const ang = Math.atan2(dirX, dirZ) + (Math.random() - 0.5) * 0.4;
+      TRAIL.queue.push({ x: px, z: pz, ang, str: 0.34 + Math.random() * 0.16 });
+      TRAIL.last = { x: TRAIL.last.x + dirX * TRAIL.STEP, z: TRAIL.last.z + dirZ * TRAIL.STEP };
+      dx = creaturePos.x - TRAIL.last.x; dz = creaturePos.z - TRAIL.last.z;
+      dist = Math.hypot(dx, dz);
+    }
+  }
+
   // ---------- 状态 ----------
   const selRes = document.getElementById("selRes");
   const btnPause = document.getElementById("btnPause");
@@ -646,16 +1071,22 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
   let camDrag = false, camLastX = 0, camLastY = 0;
 
   // ---------- 可调参数 ----------
+  // 注：线条密度(uDensity)、抖动幅度曲线(uJitter)、抖动速度(uJitterSpeed)
+  // 由情绪状态机驱动；面板"抖动幅度"滑杆 = 状态机输出之上的总倍率
   const PARAMS = [
-    ["uDensity",     "线条密度", 0.4, 2.6, 0.02, 0.4],
-    ["uWidth",       "线条粗细", 0.4, 2.0, 0.02, 1.0],
-    ["uJitter",      "抖动幅度", 0.0, 2.5, 0.05, 2.5],
-    ["uJitterSpeed", "抖动速度", 0.0, 20,  0.1,  20],
+    ["uJitterMul",   "抖动幅度", 0.0, 10.0, 0.05, 3.0],
+    ["uWidth",       "线条粗细", 0.4, 2.0, 0.02, 1.4],
     ["uCurl",        "线条卷曲", 0.0, 2.0, 0.05, 0.0],
     ["uShift",       "线条移动", 0.0, 2.0, 0.05, 0.0],
     ["uFigSize",     "人形大小", 0.4, 1.6, 0.02, 1.0],
     ["uMoveSpeed",   "移动速度", 1.0, 12.0, 0.1, 3.4],
     ["uEdge",        "边缘强度", 0.2, 2.5, 0.05, 1.0],
+    ["uPhantomSize",  "幻象大小", 0.5, 2.0, 0.05, 1.2],
+    ["uPhantomInk",   "幻象深浅", 0.0, 1.5, 0.05, 0.65],
+    ["uPhantomJitter","幻象抖动", 0.0, 3.0, 0.05, 2.3],
+    ["uTrailInk",     "痕迹深浅", 0.0, 2.0, 0.05, 1.1],
+    ["uTrailLife",    "痕迹留存时间", 1.0, 15.0, 0.5, 1.5],
+    ["uTrailWidth",   "痕迹粗细", 0.4, 2.5, 0.05, 0.85],
     ["fpsCap",       "帧数上限", 2, 120, 1, 6],
   ];
   const param = {};
@@ -687,11 +1118,329 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     setTimeout(() => intro.remove(), 500);
   });
 
+  // ================== 情绪状态机 & 假目标：全部可调参数 ==================
+  const EMOTION = {
+    // ---- 阶段门槛 ----
+    STAGE2_MOVE_DIST: 30,        // 阶段2 进入：累计移动距离（世界单位）
+    FADEOUT_TO_STAGE3: 1,        // 阶段3 进入：假目标消散次数
+    FADEOUT_TO_STAGE4: 3,        // 阶段4 进入并锁定：假目标消散次数
+    STAGE_TRANSITION_TIME: 5,    // 阶段基线过渡时长（秒，smoothstep）
+    // ---- 每阶段基线 [抖动 jitter, 密度 density] ----
+    STAGE_PARAMS: [
+      [0.15, 0.30],              // 阶段1 初入虚空（低抖动，画面疏朗）
+      [0.30, 0.45],              // 阶段2 试探漫游
+      [0.45, 0.60],              // 阶段3 追逐幻象
+      [0.70, 0.80],              // 阶段4 直面不安（高抖动高密度，锁定）
+    ],
+    // ---- 靠近宁静（未启用：靠近时画面参数变化预留，本阶段不接入） ----
+    APPROACH_FAR: 30,            // 开始进入宁静的距离（世界单位）
+    APPROACH_NEAR: 4,            // 宁静最深的距离
+    CALM_JITTER: 0.12,           // 宁静时抖动幅度降到
+    CALM_DENSITY: 0.30,          // 宁静时线条密度降到
+    CALM_SPEED: 4,               // 宁静时抖动速度（频率）降到
+    BASE_SPEED: 20,              // 常态抖动速度
+    // ---- 消散余波（阶段 C：消散完成后线条抖动缓升到 10，
+    //      玩家向下一个目标前进时再缓慢回落基线） ----
+    SURGE_JITTER: 10,            // 余波峰值：抖动强度升到（绝对输出值）
+    SURGE_DENSITY: 0.75,         // 余波期线条密度（明暗联动）
+    SURGE_RISE_TIME: 2.5,        // 升到峰值时长（秒，缓升）
+    SURGE_FALL_TIME: 4.0,        // 前进时回落时长（秒，缓降）
+    // ---- 移动情绪（抖动幅度随移动渐强，停下渐弱；密度/速度不响应移动） ----
+    MOVE_JITTER: 0.50,           // 移动时抖动幅度渐强到的峰值
+    MOVE_IN_TIME: 3.0,           // 开始移动后幅度增大的时长（秒）
+    MOVE_OUT_TIME: 4.0,          // 停下后幅度回落时长（秒）
+    // ---- 假目标（幻象）参数迁移至下方 PHANTOM 对象（多实例管理） ----
+    // ---- 平滑与漫游 ----
+    LERP_PER_FRAME: 0.05,        // 每帧向目标参数 lerp 的系数（60fps 基准，按 dt 帧率无关化）
+    WORLD_BOUND: 600,            // 漫游边界（原 ±12 边界会困住 60~120 单位外的假目标）
+  };
+
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const smooth = t => { t = Math.min(1, Math.max(0, t)); return t * t * (3 - 2 * t); };
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  // ---------- 情绪状态机状态 ----------
+  const emotion = {
+    stage: 1,                    // 当前阶段（只进不退）
+    totalMoveDist: 0,            // 累计移动距离（世界单位）
+    fadeoutCount: 0,             // 假目标消散次数
+    baseJ: EMOTION.STAGE_PARAMS[0][0], baseD: EMOTION.STAGE_PARAMS[0][1], // 当前阶段基线（过渡中）
+    fromJ: 0, fromD: 0, transT: EMOTION.STAGE_TRANSITION_TIME,            // 基线过渡来源与进度
+    calmFrozen: 0,               // 消散起始瞬间冻结的宁静深度（0~1）
+    holdJ: 0, holdD: 0,          // 消散加重后的持续维持值（P0-3：不回落）
+    moveT: 0,                    // 移动强度 0~1（开始移动渐强、停下渐弱）
+    speed: EMOTION.BASE_SPEED,   // 当前抖动速度（引擎接管 uJitterSpeed）
+    jitter: EMOTION.STAGE_PARAMS[0][0], density: EMOTION.STAGE_PARAMS[0][1], // 最终输出值
+  };
+  param.uJitter = emotion.jitter * param.uJitterMul;   // 引擎接管，交给排线 Shader
+  param.uDensity = emotion.density;
+  param.uJitterSpeed = emotion.speed;
+
+  // ---------- 幻象（假目标）管理：远处地平线随机生成 2~3 个，原地抖动循环，无实体碰撞 ----------
+  const PHANTOM = {
+    MAX: 3,                      // 同时存在上限（2~3 个）
+    SPAWN_DIST_MIN: 50,          // 生成距离下限（离生物，世界单位——远景但可辨）
+    SPAWN_DIST_MAX: 85,          // 生成距离上限
+    SCALE_MIN: 5.0,              // 线柱尺度下限（世界单位）
+    SCALE_MAX: 7.0,              // 线柱尺度上限
+    HOVER_MIN: 0.1,              // 锚点离地高度下限（烟从地表升起）
+    HOVER_MAX: 0.4,              // 锚点离地高度上限
+    TRIGGER_DIST: 12.0,          // 近距触发半径（主体靠近即启动消散，世界单位）
+    DISSOLVE_TIME: 3.0,          // 消散动画时长（秒）
+    FADEIN_TIME: 2.0,            // 生成淡入时长（秒，避免硬出现）
+    RECYCLE_DIST: 220,           // 主体远离该距离后无声换位（远景保持）
+    RESPAWN_DELAY_MIN: 3,        // 换位后到重新生成的最短间隔（秒）
+    RESPAWN_DELAY_MAX: 6,        // 换位后到重新生成的最长间隔（秒）
+    FIRST_DELAYS: [2, 5, 9],     // 开场三槽位的错峰生成时刻（秒）
+  };
+  const phantoms = [];
+  for (let i = 0; i < PHANTOM.MAX; i++)
+    phantoms.push({ on: false, fade: 0, x: 0, y: 0, z: 0,
+                    seed: 0, phase: 0, scale: 5, swirlPhase: 0,
+                    dissolving: false, dis: 0,
+                    timer: PHANTOM.FIRST_DELAYS[i] });
+  let phantomPop = 3;            // 本轮目标存活数（重开时在 2~3 间随机）
+  const phantomA = new Float32Array(12), phantomB = new Float32Array(12);   // uniform 打包缓冲
+  const phantomDis = new Float32Array(3);                                   // 消散进度 uniform 缓冲
+
+  // 两个方位角的夹角（归一到 0~π）
+  function angDist(a, b) {
+    let d = Math.abs(a - b) % (Math.PI * 2);
+    return d > Math.PI ? Math.PI * 2 - d : d;
+  }
+
+  function spawnPhantom(ph) {
+    // 方位角：与已存活幻象至少错开 110°，避免多个挤进同一视野；
+    // 在此前提下约半数偏向镜头前方扇区（易找到），其余全随机分布，每次分布都不同
+    // ★ 角度一律以相机 ro 为顶点量取——画面 FOV 是绕相机的（16:9 约 83°），
+    //   若绕生物量取，镜头拉远后 110° 会被几何压缩到 FOV 之内，同屏复发
+    const frontAz = cam.yaw - Math.PI;          // 镜头前方的方位角
+    // 首柱固定生在镜头前方扇区（它最先生成、必不冲突），保证“找得到”；
+    // 其余槽位仅 30% 概率前方、其余全随机，配合最小间隔自然散开
+    let ang;
+    if (phantoms.indexOf(ph) === 0) ang = frontAz + rand(-0.62, 0.62);
+    else if (Math.random() < 0.3) ang = frontAz + rand(-0.62, 0.62);
+    else ang = Math.random() * Math.PI * 2;
+    const dist = rand(PHANTOM.SPAWN_DIST_MIN, PHANTOM.SPAWN_DIST_MAX);
+    const roX = creaturePos.x + cam.dist * Math.sin(cam.yaw) * Math.cos(cam.pitch);
+    const roZ = creaturePos.z + cam.dist * Math.cos(cam.yaw) * Math.cos(cam.pitch);
+    // 已有稳定幻象处于当前视锥时，新候选必须落在视锥之外——超宽幅下 110°
+    // 不足以保证不同屏（hFOV 可超过 110°），不能依赖下一帧的守卫兜底
+    const halfH = Math.atan(0.5 * Math.max(1, canvas.width / Math.max(1, canvas.height))) + 0.1;
+    const centerAz = cam.yaw - Math.PI;
+    let stableInView = false;
+    for (const other of phantoms) {
+      if (other === ph || !other.on || other.dissolving) continue;
+      if (halfH - angDist(Math.atan2(other.x - roX, other.z - roZ), centerAz) > 0) { stableInView = true; break; }
+    }
+    let ok = false;
+    for (let tries = 0; tries < 24; tries++) {
+      ok = true;
+      const px = creaturePos.x + Math.sin(ang) * dist, pz = creaturePos.z + Math.cos(ang) * dist;
+      const ca = Math.atan2(px - roX, pz - roZ);   // 候选点相对相机的方位角
+      if (stableInView && halfH - angDist(ca, centerAz) > 0) ok = false;
+      if (ok) for (const other of phantoms) {
+        if (other === ph || !other.on) continue;
+        const oa = Math.atan2(other.x - roX, other.z - roZ);   // 已存活幻象相对相机的方位角
+        if (angDist(ca, oa) < 1.92) { ok = false; break; }
+      }
+      if (ok) break;
+      ang = Math.random() * Math.PI * 2;
+    }
+    if (!ok) { ph.timer = 0.5; return false; }   // 无合法方位：推迟重试，绝不带病生成
+    ph.x = creaturePos.x + Math.sin(ang) * dist;
+    ph.z = creaturePos.z + Math.cos(ang) * dist;
+    ph.y = sTerrain(ph.x, ph.z) + rand(PHANTOM.HOVER_MIN, PHANTOM.HOVER_MAX);   // 锚点贴地（烟从地表升起）
+    ph.seed = Math.random() * 100;
+    ph.phase = Math.random();                  // 抖动循环相位错开，多实例不同步
+    ph.scale = rand(PHANTOM.SCALE_MIN, PHANTOM.SCALE_MAX);
+    ph.swirlPhase = Math.random() * Math.PI * 2;
+    ph.fade = 0;
+    ph.on = true;
+    return true;
+  }
+
+  // 每帧推进：淡入 + 远景保持 + 碰撑触发消散 + 同视角守卫。
+  // 返回是否有幻象正在消散（期间画面参数锁定，不接受其他状态干扰）。
+  function updatePhantoms(dt, rawDt) {
+    let alive = 0;
+    let dissolving = false;
+    for (const ph of phantoms) {
+      if (!ph.on) continue;
+      if (ph.dissolving) {
+        // 阶段 B：消散动画平滑推进，玩家移动不打断
+        // 用真实帧间隔 rawDt（不钳制）计时——默认 6 帧上限会钳短 dt，
+        // 若用 dt 计时，墙钟时长会被拉长到约 5 秒；rawDt 保证任何帧率下都是整 3 秒
+        // 视角冲突的静默换位走 0.4 倍时长（约 1.2 秒），尽快还清画面
+        dissolving = true;
+        const dur = ph.silent ? PHANTOM.DISSOLVE_TIME * 0.4 : PHANTOM.DISSOLVE_TIME;
+        ph.dis = Math.min(1, ph.dis + (rawDt || dt) / dur);
+        if (ph.dis >= 1) {
+          // 阶段 C：彻底消散——该目标永久移除，余波启动，排下一个新目标
+          ph.on = false; ph.dissolving = false; ph.dis = 0;
+          if (ph.silent) {
+            ph.silent = false;               // 静默换位：不算“发现”，不推进情绪状态机
+          } else {
+            emotion.fadeoutCount++;          // 状态机阶段推进（阶段3/4 基线抬升）
+            surgeStart();                    // 线条抖动缓升至 10
+          }
+          ph.timer = rand(PHANTOM.RESPAWN_DELAY_MIN, PHANTOM.RESPAWN_DELAY_MAX);
+        }
+        continue;
+      }
+      const dx = ph.x - creaturePos.x, dz = ph.z - creaturePos.z;
+      // 触发：虫形主体进入幻象碰撞范围，自动启动消散动画
+      if (Math.hypot(dx, dz) < PHANTOM.TRIGGER_DIST) {
+        ph.dissolving = true; ph.dis = 0;
+        dissolving = true;
+        continue;
+      }
+      ph.fade = Math.min(1, ph.fade + dt / PHANTOM.FADEIN_TIME);
+      if (Math.hypot(dx, dz) > PHANTOM.RECYCLE_DIST) {
+        ph.on = false;                         // 远景之外无声换位，无硬切观感
+        ph.timer = 0;                          // 立即重排（timer 会残留上次倒计时的 ≤0 值）
+      } else {
+        alive++;
+      }
+    }
+    // ---- 同视角守卫（每帧）：生成时的 110° 约束只对生成瞬间的相机成立，
+    // 生物走动、玩家转视角都会让两个幻象重新挤进同一画面——这里持续纠偏：
+    // 稳定幻象同屏 ≥2 时，把最靠画面边缘的一个静默快速消散（消散动画自然，无硬切）
+    {
+      const roX = creaturePos.x + cam.dist * Math.sin(cam.yaw) * Math.cos(cam.pitch);
+      const roZ = creaturePos.z + cam.dist * Math.cos(cam.yaw) * Math.cos(cam.pitch);
+      const centerAz = cam.yaw - Math.PI;                    // 视线中心的方位角（相机注视生物）
+      const halfH = Math.atan(0.5 * Math.max(1, canvas.width / Math.max(1, canvas.height))) + 0.1;
+      let victim = null, victimEdge = Infinity, inView = 0;
+      for (const ph of phantoms) {
+        if (!ph.on || ph.dissolving) continue;
+        const edge = halfH - angDist(Math.atan2(ph.x - roX, ph.z - roZ), centerAz);
+        if (edge > 0) {                                      // 在当前视锥内（含 0.1 rad 余量）
+          inView++;
+          if (edge < victimEdge) { victim = ph; victimEdge = edge; }   // 越靠边缘消失越不显眼
+        }
+      }
+      if (inView > 1 && victim) { victim.dissolving = true; victim.dis = 0; victim.silent = true; }
+    }
+    if (alive < phantomPop) {
+      for (const ph of phantoms) {
+        if (alive >= phantomPop) break;
+        if (!ph.on) {
+          ph.timer -= dt;
+          if (ph.timer <= 0) { if (spawnPhantom(ph)) alive++; }
+        }
+      }
+    }
+    return dissolving;
+  }
+
+  // 每帧推进：阶段判定 -> 基线过渡 -> 假目标生命周期 -> 叠加波动 -> 合成输出
+  function updateExperience(dt, moving, disLock) {
+    // ---- 消散播放期间：锁定当前画面参数，不接受其他状态干扰 ----
+    if (disLock) return;
+    // ---- 阶段判定（阈值满足即进入，不回落） ----
+    let stage = 1;
+    if (emotion.totalMoveDist > EMOTION.STAGE2_MOVE_DIST) stage = 2;
+    if (emotion.fadeoutCount >= EMOTION.FADEOUT_TO_STAGE3) stage = 3;
+    if (emotion.fadeoutCount >= EMOTION.FADEOUT_TO_STAGE4) stage = 4;
+    if (stage !== emotion.stage) {
+      emotion.fromJ = emotion.baseJ;
+      emotion.fromD = emotion.baseD;
+      emotion.transT = 0;
+      emotion.stage = stage;
+    }
+    // ---- 阶段基线：smoothstep 在 STAGE_TRANSITION_TIME 秒内平滑过渡 ----
+    const [bj, bd] = EMOTION.STAGE_PARAMS[emotion.stage - 1];
+    if (emotion.transT < EMOTION.STAGE_TRANSITION_TIME) {
+      emotion.transT += dt;
+      const s = smooth(emotion.transT / EMOTION.STAGE_TRANSITION_TIME);
+      emotion.baseJ = lerp(emotion.fromJ, bj, s);
+      emotion.baseD = lerp(emotion.fromD, bd, s);
+    } else {
+      emotion.baseJ = bj;
+      emotion.baseD = bd;
+    }
+
+    // ---- 幻象靠近宁静 / 消散：本次不接入（下一阶段开发），见 EMOTION 注释 ----
+
+    // ---- 移动情绪（抖动幅度专属）：开始移动渐强，停下渐弱 ----
+    const moveGoal = moving ? 1 : 0;
+    const moveRate = moveGoal > emotion.moveT ? 1 / EMOTION.MOVE_IN_TIME : -1 / EMOTION.MOVE_OUT_TIME;
+    emotion.moveT = Math.min(1, Math.max(0, emotion.moveT + moveRate * dt));
+    const mSmooth = smooth(emotion.moveT);
+
+    // ---- 合成目标参数（移动渐强；靠近宁静/消散联动本次不接入） ----
+    // 维持下限：阶段基线只升不降（hold 值由下一阶段的消散逻辑写入）
+    const effJ = Math.max(emotion.baseJ, emotion.holdJ);
+    const effD = Math.max(emotion.baseD, emotion.holdD);
+    // 抖动幅度：移动渐强（峰值不低于当前维持值）；密度/速度不响应移动
+    const tj = lerp(effJ, Math.max(effJ, EMOTION.MOVE_JITTER), mSmooth);
+    const td = effD;
+    const ts = EMOTION.BASE_SPEED;
+
+    // ---- 每帧向目标值 lerp（60fps 基准系数按 dt 换算，帧率无关） ----
+    const k = 1 - Math.pow(1 - EMOTION.LERP_PER_FRAME, dt * 60);
+    emotion.jitter += (tj - emotion.jitter) * k;
+    emotion.density += (td - emotion.density) * k;
+    emotion.speed += (ts - emotion.speed) * k;
+    param.uJitter = emotion.jitter * param.uJitterMul;   // 面板"抖动幅度"滑杆 = 总倍率
+    param.uDensity = emotion.density;
+    param.uJitterSpeed = emotion.speed;
+
+    // ---- 消散余波（阶段 C）：线条抖动缓升至 10、密度向 0.75（明暗联动），
+    //      玩家向下一个目标前进时按同一条 smooth 曲线缓慢回落基线 ----
+    const sAmt = smooth(surge.v);
+    if (sAmt > 0.0001) {
+      param.uJitter = lerp(param.uJitter, EMOTION.SURGE_JITTER, sAmt);
+      param.uDensity = lerp(param.uDensity, EMOTION.SURGE_DENSITY, sAmt);
+    }
+  }
+
+  // ---------- 消散余波状态机：idle → rise（缓升至峰值）→ hold → fall（前进回落） ----------
+  const surge = { v: 0, phase: "idle" };
+  function surgeStart() { surge.v = 0; surge.phase = "rise"; }
+  function updateSurge(dt, moving) {
+    if (surge.phase === "rise") {
+      surge.v = Math.min(1, surge.v + dt / EMOTION.SURGE_RISE_TIME);
+      if (surge.v >= 1) surge.phase = "hold";
+    } else if (surge.phase === "hold") {
+      if (moving) surge.phase = "fall";   // 向下一个目标前进才开始回落
+    } else if (surge.phase === "fall") {
+      surge.v = Math.max(0, surge.v - dt / EMOTION.SURGE_FALL_TIME);
+      if (surge.v <= 0) surge.phase = "idle";
+    }
+  }
+
+  function resetExperience() {
+    emotion.stage = 1;
+    emotion.totalMoveDist = 0;
+    emotion.fadeoutCount = 0;
+    emotion.baseJ = emotion.fromJ = emotion.jitter = EMOTION.STAGE_PARAMS[0][0];
+    emotion.baseD = emotion.fromD = emotion.density = EMOTION.STAGE_PARAMS[0][1];
+    emotion.transT = EMOTION.STAGE_TRANSITION_TIME;
+    emotion.calmFrozen = 0;
+    emotion.holdJ = 0; emotion.holdD = 0;
+    emotion.speed = EMOTION.BASE_SPEED;
+    param.uJitter = emotion.jitter * param.uJitterMul;
+    param.uDensity = emotion.density;
+    param.uJitterSpeed = emotion.speed;
+    // 幻象重置：清空槽位，按 2~3 的目标数错峰重生
+    surge.v = 0; surge.phase = "idle";
+    phantomPop = Math.random() < 0.4 ? 2 : 3;
+    phantoms.forEach((ph, i) => {
+      ph.on = false; ph.fade = 0; ph.dissolving = false; ph.dis = 0; ph.silent = false;
+      ph.timer = PHANTOM.FIRST_DELAYS[i];
+    });
+  }
+
   // ---------- 人形位置（方向键/WASD 控制，贴地行走） ----------
   const creaturePos = { x: 0, z: 0 };
   const keys = new Set();
   // 爬行状态：方向 / 强度 / 节肢步态相位
   const crawl = { dirX: 0, dirZ: 1, inten: 0.15, heldT: 0, sway: 0, turn: 0 };
+  // P0-2：头部是唯一前向。输入与头部朝向夹角超过约 70°（cos < ALIGN_COS）时
+  // 只原地调头不平移，调头到位后才继续前进——任意时刻不存在"尾朝前走"
+  const ALIGN_COS = 0.34;
   let gaitT = 0;
 
   // 与着色器一致的 Terrain 高度（JS 版），让人形贴着地面移动
@@ -730,17 +1479,21 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     creaturePos.x = 0; creaturePos.z = 0;
     crawl.dirX = 0; crawl.dirZ = 1; crawl.inten = 0.15;
     crawl.heldT = 0; crawl.sway = 0; crawl.turn = 0; gaitT = 0;
+    resetExperience();
     for (const d of passDefs) if (!d.toScreen) allocTargets(d.name);
+    allocTrail();   // 行走痕迹一并清空（重开无残留）
   }
 
   function setUnif(p, name, setter) { if (p.u[name]) setter(p.u[name]); }
 
-  function render(dt) {
+  function render(dt, rawDt) {
     resize();
     const w = canvas.width, h = canvas.height;
     const d = new Date();
     const date = [d.getFullYear(), d.getMonth() + 1, d.getDate(),
                   d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds() + d.getMilliseconds() / 1000];
+
+    renderTrail(rawDt);   // 行走痕迹先于 Buffer A 推进（地表采样最新纹理）
 
     for (const p of passes) {
       if (!p.toScreen) {
@@ -759,6 +1512,15 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
         gl.bindTexture(gl.TEXTURE_2D, tex);
         if (p.u["iChannel" + ci]) gl.uniform1i(p.u["iChannel" + ci], ci);
       });
+
+      // 行走痕迹纹理：Buffer A 地表分支采样（Image pass 经由 Buffer A 间接获得）
+      if (p.name === "Buffer A" && p.u.uTrailTex) {
+        gl.activeTexture(gl.TEXTURE4);
+        gl.bindTexture(gl.TEXTURE_2D, trailCurrentTex);
+        gl.uniform1i(p.u.uTrailTex, 4);
+        gl.uniform2f(p.u.uTrailOrigin, TRAIL.origin.x, TRAIL.origin.z);
+        gl.uniform1f(p.u.uTrailWindow, TRAIL.WINDOW);
+      }
 
       setUnif(p, "iResolution", loc => gl.uniform3f(loc, w, h, w / h));
       setUnif(p, "iTime", loc => gl.uniform1f(loc, simTime));
@@ -787,6 +1549,19 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
       setUnif(p, "uCamYaw", loc => gl.uniform1f(loc, cam.yaw));
       setUnif(p, "uCamPitch", loc => gl.uniform1f(loc, cam.pitch));
       setUnif(p, "uCamDist", loc => gl.uniform1f(loc, cam.dist));
+      // 情绪状态机输出的排线参数（面板不再手动调节这三项）
+      setUnif(p, "uJitter", loc => gl.uniform1f(loc, param.uJitter));
+      setUnif(p, "uDensity", loc => gl.uniform1f(loc, param.uDensity));
+      setUnif(p, "uJitterSpeed", loc => gl.uniform1f(loc, param.uJitterSpeed));
+      // 幻象（假目标）：3 个实例槽位打包进 uniform 数组
+      phantoms.forEach((ph, i) => {
+        phantomA.set([ph.x, ph.y, ph.z, ph.on ? ph.fade : 0], i * 4);
+        phantomB.set([ph.seed, ph.phase, ph.scale, ph.swirlPhase], i * 4);
+        phantomDis[i] = ph.on ? ph.dis : 0;
+      });
+      setUnif(p, "uPhantomA", loc => gl.uniform4fv(loc, phantomA));
+      setUnif(p, "uPhantomB", loc => gl.uniform4fv(loc, phantomB));
+      setUnif(p, "uPhantomDis", loc => gl.uniform1fv(loc, phantomDis));
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
@@ -794,30 +1569,52 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     frame++;
   }
 
+  // ---------- 帧调度：可见时走 rAF；后台/遮挡标签的 rAF 与 setTimeout 均会被
+  // 浏览器深度节流，改由 Worker 定时器驱动续帧（Worker 不受页面可见性节流） ----------
+  let workerPump = null;
+  function scheduleTick() {
+    if (!document.hidden) { requestAnimationFrame(tick); return; }
+    if (!workerPump) {
+      workerPump = new Worker(URL.createObjectURL(
+        new Blob(["setInterval(function(){ postMessage(0); }, 16);"], { type: "text/javascript" })));
+      // 无条件驱动（多余调用会被帧数上限闸门挡掉）；可见时 rAF 照常并行调度
+      workerPump.onmessage = () => tick(performance.now());
+    }
+  }
+
   function tick(now) {
-    requestAnimationFrame(tick);
+    scheduleTick();
     // 帧数上限：低于上限时跳过本帧（动画时间仍按真实时间推进）
     const cap = param.fpsCap || 60;
     if (lastRender && now - lastRender < 1000 / cap - 2) return;
     try {
       const dt = lastNow ? Math.min((now - lastNow) / 1000, 0.1) : 0;
+      const rawDt = lastNow ? Math.min((now - lastNow) / 1000, 0.5) : 0;   // 未受 0.1s 钳制的真实帧间隔（低帧率上限下保证消散等实时动画不慢放）
       lastNow = now; lastRender = now;
       if (dt > 0) fpsAvg = fpsAvg ? fpsAvg * 0.95 + (1 / Math.max(dt, 1e-4)) * 0.05 : 1 / Math.max(dt, 1e-4);
       if (!paused) simTime += dt;
 
       // ---- WASD/方向键：下达爬行指令（抗拒式蠕动，非平移） ----
-      let dx = 0, dz = 0;
-      if (keys.has("ArrowLeft") || keys.has("KeyA")) dx -= 1;
-      if (keys.has("ArrowRight") || keys.has("KeyD")) dx += 1;
-      if (keys.has("ArrowUp") || keys.has("KeyW")) dz += 1;
-      if (keys.has("ArrowDown") || keys.has("KeyS")) dz -= 1;
-      const anyKey = (dx !== 0 || dz !== 0);
+      // P0-1：移动向量取相机相对空间——W=镜头前方，A/D=镜头左右，
+      // 用镜头 forward/right 的水平分量合成世界方向（俯仰不影响水平速度）
+      let ix = 0, iz = 0;
+      if (keys.has("ArrowLeft") || keys.has("KeyA")) ix -= 1;
+      if (keys.has("ArrowRight") || keys.has("KeyD")) ix += 1;
+      if (keys.has("ArrowUp") || keys.has("KeyW")) iz += 1;
+      if (keys.has("ArrowDown") || keys.has("KeyS")) iz -= 1;
+      const anyKey = (ix !== 0 || iz !== 0);
+      let wx = 0, wz = 0;
       if (anyKey) {
+        const fX = -Math.sin(cam.yaw), fZ = -Math.cos(cam.yaw);   // 镜头前方（水平）
+        const rX = -Math.cos(cam.yaw), rZ =  Math.sin(cam.yaw);   // 镜头右方（水平）
+        wx = fX * iz + rX * ix;
+        wz = fZ * iz + rZ * ix;
+        const wl = Math.hypot(wx, wz) || 1;
+        wx /= wl; wz /= wl;
         crawl.heldT += dt;
-        const l = Math.hypot(dx, dz);
         const k = Math.min(1, dt * 6);          // 转向响应更快
-        crawl.dirX += (dx / l - crawl.dirX) * k;
-        crawl.dirZ += (dz / l - crawl.dirZ) * k;
+        crawl.dirX += (wx - crawl.dirX) * k;
+        crawl.dirZ += (wz - crawl.dirZ) * k;
         const fl = Math.hypot(crawl.dirX, crawl.dirZ) || 1;
         crawl.dirX /= fl; crawl.dirZ /= fl;
         crawl.inten = Math.min(1.0, crawl.inten + dt * (0.55 + crawl.heldT * 0.12));
@@ -827,8 +1624,11 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
         crawl.inten += (0.15 - crawl.inten) * Math.min(1, dt * 1.2);
         gaitT += dt * 1.6;   // 停下后仍缓慢交替迈步（不会彻底静止）
       }
-      // 转体：根须系统朝向随方向键明显转身（体朝向 = 前进方向）
-      const targetAng = Math.atan2(crawl.dirZ, crawl.dirX) - Math.PI / 2;
+      // 转体：根须系统朝向随方向键明显转身。
+      // P0-2 修正：着色器对采样点做 R(-turn) 旋转，局部 +z（头部端）的
+      // 世界朝向为 (sin turn, cos turn)，故目标转角须取 π/2 - atan2(dirZ, dirX)
+      // 头部端才能精确指向移动方向（原 -π/2 约定会让左右移动时尾端朝前）
+      const targetAng = Math.PI / 2 - Math.atan2(crawl.dirZ, crawl.dirX);
       let dA = targetAng - crawl.turn;
       while (dA > Math.PI) dA -= Math.PI * 2;
       while (dA < -Math.PI) dA += Math.PI * 2;
@@ -838,19 +1638,40 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
       const spd = (param.uMoveSpeed || 3) * 1.15 * (0.45 + 0.85 * crawl.inten);
       const push = 0.25 + 0.75 * Math.pow(Math.abs(Math.sin(gaitT)), 2);
       // 仅在按键时推进位置（无输入时根须只在原地细微颤动，不会自行漂移）
-      if (anyKey && push > 0.02) {
+      // P0-2：闸门判定渲染中的身体前向——局部 +z 头部端经 R(-turn) 后的
+      // 世界朝向 (sin turn, cos turn)，与画面一致；夹角超限时只调头不平移，
+      // 画面上任意时刻都不存在"尾朝前走"（前后左右四个方向均成立）
+      const bFX = Math.sin(crawl.turn), bFZ = Math.cos(crawl.turn);
+      const facing = bFX * wx + bFZ * wz;
+      let moved = false;
+      if (anyKey && facing >= ALIGN_COS && push > 0.02) {
         const swA = Math.sin(simTime * 1.9 + crawl.sway) * 0.14 * crawl.inten;
         let fx2 = crawl.dirX - crawl.dirZ * swA;
         let fz2 = crawl.dirZ + crawl.dirX * swA;
         const fl2 = Math.hypot(fx2, fz2) || 1;
         fx2 /= fl2; fz2 /= fl2;
-        creaturePos.x = Math.min(12, Math.max(-12, creaturePos.x + fx2 * spd * push * dt));
-        creaturePos.z = Math.min(16, Math.max(-8, creaturePos.z + fz2 * spd * push * dt));
+        const nx = Math.min(EMOTION.WORLD_BOUND, Math.max(-EMOTION.WORLD_BOUND, creaturePos.x + fx2 * spd * push * dt));
+        const nz = Math.min(EMOTION.WORLD_BOUND, Math.max(-EMOTION.WORLD_BOUND, creaturePos.z + fz2 * spd * push * dt));
+        // 幻象无实体碰撞：主体可从幻象中穿过（幻象不阻挡主体、不产生穿模阻挡）
+        // 累计实际位移长度（情绪状态机阶段2 的进入依据）
+        emotion.totalMoveDist += Math.hypot(nx - creaturePos.x, nz - creaturePos.z);
+        creaturePos.x = nx; creaturePos.z = nz;
+        moved = true;
       }
       // 路径偶尔偏摆（拒绝规整直线）
       if (Math.random() < dt * 0.7) crawl.sway = Math.random() * Math.PI * 2;
 
-      render(dt);
+      // 行走痕迹：随位移投递本帧足迹（停止移动即不再新增）
+      updateTrailEmit(moved);
+
+      // 情绪状态机 & 幻象（暂停时一并冻结）
+      if (!paused && dt > 0) {
+        const disLock = updatePhantoms(dt, rawDt);
+        updateSurge(dt, anyKey);
+        updateExperience(dt, anyKey, disLock);
+      }
+
+      render(dt, rawDt);
     } catch (e) {
       window.__pageError = (e && (e.message + "\n" + e.stack)) || String(e);
     }
@@ -859,7 +1680,17 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
     window.__status = { ok: true, hidden: document.hidden, paused, w: canvas.width, h: canvas.height,
       fps: Math.round(fpsAvg), frame, error: window.__pageError || null,
       pos: { x: +creaturePos.x.toFixed(2), z: +creaturePos.z.toFixed(2) },
-      crawl: { inten: +crawl.inten.toFixed(2), turn: +crawl.turn.toFixed(2) } };
+      crawl: { inten: +crawl.inten.toFixed(2), turn: +crawl.turn.toFixed(2) },
+      cam: { yaw: +cam.yaw.toFixed(3), pitch: +cam.pitch.toFixed(3), dist: +cam.dist.toFixed(2) },
+      stage: emotion.stage, moveDist: +emotion.totalMoveDist.toFixed(1), fadeouts: emotion.fadeoutCount,
+      lineParams: { jitter: +param.uJitter.toFixed(3), density: +param.uDensity.toFixed(3),
+                    speed: +param.uJitterSpeed.toFixed(2) },
+      surgePhase: surge.phase,
+      trail: { queue: TRAIL.queue.length, origin: { x: +TRAIL.origin.x.toFixed(1), z: +TRAIL.origin.z.toFixed(1) },
+               life: param.uTrailLife, ink: param.uTrailInk, width: param.uTrailWidth },
+      phantoms: phantoms.map(ph => ph.on ?
+        { x: +ph.x.toFixed(1), z: +ph.z.toFixed(1), fade: +ph.fade.toFixed(2),
+          dis: +ph.dis.toFixed(2), dissolving: ph.dissolving } : null) };
   }
 
   // ---------- 交互 ----------
@@ -921,11 +1752,12 @@ void main(){ mainImage(outColor, gl_FragCoord.xy); }`;
       const built = buildProgram(fragSource(src[d.name]), d.name);
       d.prog = built.prog; d.u = built.u;
     }
+    trailPass = buildProgram(fragSource(src["Trail"]), "Trail");
     passes = passDefs;
     resize();
     restart();
     window.__started = true;
-    requestAnimationFrame(tick);
+    scheduleTick();
   }).catch(e => {
     window.__pageError = String(e && e.stack || e);
     fatal("初始化失败: " + (e && e.message || e));

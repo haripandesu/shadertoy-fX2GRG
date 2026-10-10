@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>RUNNING</title></head>
+<body><pre id="out">running...</pre>
+<script>
+// 同视角守卫测试 harness：从 scene3d.html 源码原样提取幻象三函数，注入桩环境跑断言。
+(async () => {
+  const out = [];
+  const ok = (name, cond, detail) => out.push((cond ? "PASS " : "FAIL ") + name + (detail ? "  -> " + detail : ""));
+  try {
+    const src = await (await fetch("scene3d.html?t=" + Date.now())).text();
+    // 花括号配平提取函数体（假设函数体内注释/字符串不含花括号——已核对源码）
+    function extractFn(name, args) {
+      const marker = "function " + name + "(" + args + ") {";
+      const start = src.indexOf(marker);
+      if (start < 0) throw new Error("marker not found: " + marker);
+      let depth = 0, i = start + marker.length - 1;
+      for (; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") { depth--; if (depth === 0) break; }
+      }
+      return src.slice(start, i + 1);
+    }
+    const code = [extractFn("angDist", "a, b"),
+                  extractFn("spawnPhantom", "ph"),
+                  extractFn("updatePhantoms", "dt, rawDt")].join("\n");
+    out.push("extracted bytes: " + code.length);
+
+    function makeCtx(aspectW, aspectH) {
+      const ctx = {
+        cam: { yaw: Math.PI, pitch: 0.25, dist: 24 },
+        creaturePos: { x: 0, z: 0 },
+        PHANTOM: { MAX: 3, SPAWN_DIST_MIN: 50, SPAWN_DIST_MAX: 85, SCALE_MIN: 5, SCALE_MAX: 7,
+                   HOVER_MIN: 0.1, HOVER_MAX: 0.4, TRIGGER_DIST: 12, DISSOLVE_TIME: 3,
+                   FADEIN_TIME: 2, RECYCLE_DIST: 220, RESPAWN_DELAY_MIN: 3, RESPAWN_DELAY_MAX: 6,
+                   FIRST_DELAYS: [2, 5, 9] },
+        phantoms: [0, 1, 2].map(() => ({ on: false, fade: 0, x: 0, y: 0, z: 0, seed: 0, phase: 0,
+          scale: 5, swirlPhase: 0, dissolving: false, dis: 0, silent: false, timer: 0 })),
+        emotion: { fadeoutCount: 0 },
+        phantomPop: 3,
+        surgeStart: () => { ctx._surge = (ctx._surge || 0) + 1; },
+        canvas: { width: aspectW, height: aspectH },
+        rand: (a, b) => a + Math.random() * (b - a),
+        sTerrain: () => 0,
+      };
+      return ctx;
+    }
+    function bind(ctx) {
+      const keys = Object.keys(ctx);
+      const fn = new Function(...keys, code + "\n;return { angDist, spawnPhantom, updatePhantoms };");
+      return fn(...keys.map(k => ctx[k]));
+    }
+    const angDistOf = (a, b) => { let d = Math.abs(a - b) % (Math.PI * 2); return d > Math.PI ? Math.PI * 2 - d : d; };
+    const camRo = c => ({ x: c.creaturePos.x + c.cam.dist * Math.sin(c.cam.yaw) * Math.cos(c.cam.pitch),
+                          z: c.creaturePos.z + c.cam.dist * Math.cos(c.cam.yaw) * Math.cos(c.cam.pitch) });
+    const viewCenterAz = c => c.cam.yaw - Math.PI;
+    const halfH = c => Math.atan(0.5 * c.canvas.width / Math.max(1, c.canvas.height)) + 0.1;
+    const inView = (c, ph) => {
+      const ro = camRo(c);
+      return halfH(c) - angDistOf(Math.atan2(ph.x - ro.x, ph.z - ro.z), viewCenterAz(c)) > 0;
+    };
+
+    // ---- T1 生成规则压力测试：16:9 满缩放，反复排满 3 槽，任意时刻稳定幻象同屏 <=1 ----
+    {
+      const ctx = makeCtx(1280, 720); const api = bind(ctx);
+      let badPairs = 0, spawnFail = 0, rounds = 0, twoAliveRounds = 0;
+      for (let r = 0; r < 2000; r++) {
+        rounds++;
+        for (const ph of ctx.phantoms) { if (Math.random() < 0.25) { ph.on = false; ph.timer = 0; } }
+        for (const ph of ctx.phantoms) {
+          if (!ph.on && ph.timer <= 0) { if (!api.spawnPhantom(ph)) { ph.timer = 0.5; spawnFail++; } }
+        }
+        const stable = ctx.phantoms.filter(p => p.on && !p.dissolving);
+        if (stable.length >= 2) twoAliveRounds++;
+        for (let i = 0; i < stable.length; i++) for (let j = i + 1; j < stable.length; j++) {
+          const ro = camRo(ctx);
+          const a1 = Math.atan2(stable[i].x - ro.x, stable[i].z - ro.z);
+          const a2 = Math.atan2(stable[j].x - ro.x, stable[j].z - ro.z);
+          if (angDistOf(a1, a2) < 1.92) badPairs++;
+        }
+        let inCt = 0; for (const p of stable) if (inView(ctx, p)) inCt++;
+        if (inCt > 1) badPairs += 100;   // 视锥语义违规重罚计数
+      }
+      ok("T1 spawn-rule 2000轮 16:9 满缩放 无同屏对", badPairs === 0,
+         "badPairs=" + badPairs + " twoAliveRounds=" + twoAliveRounds + " deferred=" + spawnFail);
+    }
+
+    // ---- T1b 超宽幅 8:1 同样的生成压力：视锥语义不变量必须直接成立（生成即合法，不靠守卫补） ----
+    {
+      const ctx = makeCtx(2560, 320); const api = bind(ctx);
+      let inViewViolations = 0, rounds = 0;
+      for (let r = 0; r < 2000; r++) {
+        rounds++;
+        for (const ph of ctx.phantoms) { if (Math.random() < 0.25) { ph.on = false; ph.timer = 0; } }
+        for (const ph of ctx.phantoms) {
+          if (!ph.on && ph.timer <= 0) { if (!api.spawnPhantom(ph)) ph.timer = 0.5; }
+        }
+        // 不调用守卫：纯生成规则下也不允许两个稳定幻象同时入锥
+        let inCt = 0;
+        for (const p of ctx.phantoms) if (p.on && !p.dissolving && inView(ctx, p)) inCt++;
+        if (inCt > 1) inViewViolations++;
+      }
+      ok("T1b spawn-rule 2000轮 8:1 超宽幅 无同屏对", inViewViolations === 0,
+         "violations=" + inViewViolations + " rounds=" + rounds);
+    }
+
+    // ---- T2 每帧守卫端到端：超宽幅 8:1，两个 110° 合法幻象同入视锥 -> 守卫静默消散靠边一个 ----
+    {
+      const ctx = makeCtx(2560, 320); const api = bind(ctx);
+      // 手工放置：绕相机 ±55°（生成规则允许的上限），距离 60
+      const roAz = viewCenterAz(ctx);
+      const place = (ph, ang) => { ph.on = true; ph.fade = 1; ph.dissolving = false; ph.dis = 0;
+        ph.x = ctx.creaturePos.x + Math.sin(ang) * 60; ph.z = ctx.creaturePos.z + Math.cos(ang) * 60;
+        ph.silent = false; ph.timer = 9; };
+      const pA = ctx.phantoms[0], pB = ctx.phantoms[1];
+      place(pA, roAz + 55 * Math.PI / 180);
+      place(pB, roAz - 55 * Math.PI / 180);
+      ok("T2 前置：两个稳定幻象都在 8:1 视锥内", inView(ctx, pA) && inView(ctx, pB));
+      const dis0 = ctx.emotion.fadeoutCount, surge0 = ctx._surge || 0;
+      let kicked = -1, victimTimer = -1;
+      for (let t = 0; t < 600; t++) {           // 模拟 ~10 秒（60fps 步长）
+        api.updatePhantoms(1 / 60, 1 / 60);
+        if (kicked < 0 && (pA.dissolving || pB.dissolving)) {
+          kicked = t;
+          const victim = pA.dissolving ? pA : pB, other = pA.dissolving ? pB : pA;
+          ok("T2a 守卫触发且选边正确（消散靠边缘者）", victim.silent === true && other.dissolving === false,
+             "victim.silent=" + victim.silent);
+        }
+        if (victimTimer < 0 && !pA.on !== !pB.on) victimTimer = (!pA.on ? pA : pB).timer;
+      }
+      ok("T2b 守卫确实触发", kicked >= 0, "kickedAtTick=" + kicked);
+      const done = !pA.on || !pB.on;
+      ok("T2c 静默消散完成且移除", done);
+      ok("T2d 静默消散不计入发现数/不触发余波",
+         ctx.emotion.fadeoutCount === dis0 && (ctx._surge || 0) === surge0,
+         "fadeouts=" + ctx.emotion.fadeoutCount + " surge=" + (ctx._surge || 0));
+      ok("T2e 被移除者重排计时 3~6 秒", victimTimer >= 3 && victimTimer <= 6.0001,
+         "timer=" + victimTimer.toFixed(2));
+      for (let t = 0; t < 5; t++) api.updatePhantoms(1 / 60, 1 / 60);   // 留出守卫纠偏帧
+      const stableCnt = ctx.phantoms.filter(p => p.on && !p.dissolving && inView(ctx, p)).length;
+      ok("T2f 终态视锥内稳定幻象 <=1", stableCnt <= 1, "stableInView=" + stableCnt);
+    }
+
+    // ---- T3 正常触发消散（靠近主体）仍计入发现数并触发余波 ----
+    {
+      const ctx = makeCtx(1280, 720); const api = bind(ctx);
+      const ph = ctx.phantoms[0];
+      ph.on = true; ph.fade = 1; ph.dissolving = false; ph.dis = 0; ph.silent = false; ph.timer = 9;
+      ph.x = 5; ph.z = 0;                        // 距主体 5 < TRIGGER_DIST 12
+      api.updatePhantoms(1 / 60, 1 / 60);
+      ok("T3a 近距触发消散且非静默", ph.dissolving === true && !ph.silent);
+      let timerAtDone = -1;
+      for (let t = 0; t < 400; t++) {           // 走完 3 秒消散
+        api.updatePhantoms(1 / 60, 1 / 60);
+        if (timerAtDone < 0 && !ph.on) timerAtDone = ph.timer;
+      }
+      ok("T3b 消散完成并计入 fadeoutCount+surge", !ph.on && ctx.emotion.fadeoutCount === 1 && ctx._surge === 1,
+         "fadeouts=" + ctx.emotion.fadeoutCount + " surge=" + (ctx._surge || 0));
+      ok("T3c 完成瞬间重排计时 3~6 秒", timerAtDone >= 3 && timerAtDone <= 6.0001,
+         "timer=" + timerAtDone.toFixed(2));
+    }
+
+    // ---- T4 远景无声换位：timer 归零立即重排（旧 bug：残留负 timer 未清） ----
+    {
+      const ctx = makeCtx(1280, 720); const api = bind(ctx);
+      const ph = ctx.phantoms[0];
+      ph.on = true; ph.fade = 1; ph.dissolving = false; ph.dis = 0; ph.timer = -2;   // 残留负值
+      ph.x = 300; ph.z = 0;                       // > RECYCLE_DIST 220
+      api.updatePhantoms(1 / 60, 1 / 60);
+      // 预期：同帧回收并立即重排（timer 清 0 生效），或无合法方位推迟 0.5s
+      const respawnedFresh = ph.on && Math.hypot(ph.x, ph.z) <= ctx.PHANTOM.SPAWN_DIST_MAX + 1e-6;
+      ok("T4 远景换位当帧重排到合法近位（或推迟）", respawnedFresh || (!ph.on && ph.timer === 0.5),
+         "on=" + ph.on + " timer=" + ph.timer.toFixed(2) + " x=" + ph.x.toFixed(1) + " z=" + ph.z.toFixed(1));
+    }
+
+    // ---- T5 生物走动后的方位角漂移场景：16:9 下两个合法幻象随相机顶点移动压缩，守卫兜底 ----
+    {
+      const ctx = makeCtx(1280, 720); const api = bind(ctx);
+      const roAz = viewCenterAz(ctx);
+      const place = (ph, ang) => { ph.on = true; ph.fade = 1; ph.dissolving = false; ph.dis = 0;
+        ph.x = ctx.creaturePos.x + Math.sin(ang) * 55; ph.z = ctx.creaturePos.z + Math.cos(ang) * 55;
+        ph.silent = false; ph.timer = 9; };
+      place(ctx.phantoms[0], roAz + 56 * Math.PI / 180);
+      place(ctx.phantoms[1], roAz - 56 * Math.PI / 180);
+      // 生物沿两幻象连线中垂线方向远离，相机顶点随动 -> 相对相机的夹角张开（16:9 不会同屏）
+      // 反向：生物朝两幻象中点走近 -> 夹角收拢 -> 进入视锥 -> 守卫必须出手
+      let guardFired = false, violated = false;
+      for (let step = 0; step < 900; step++) {
+        // 生物以 3 单位/秒 走向两幻象连线中点
+        ctx.creaturePos.x += 3 / 60 * Math.sin(roAz);
+        ctx.creaturePos.z += 3 / 60 * Math.cos(roAz);
+        for (const ph of ctx.phantoms) { if (ph.on && !ph.dissolving) {
+          const d = Math.hypot(ph.x - ctx.creaturePos.x, ph.z - ctx.creaturePos.z);
+          if (d < 12) { ph.dissolving = true; ph.dis = 0; }    // 途中近距触发照常
+        } }
+        api.updatePhantoms(1 / 60, 1 / 60);
+        const stable = ctx.phantoms.filter(p => p.on && !p.dissolving);
+        let inCt = 0; for (const p of stable) if (inView(ctx, p)) inCt++;
+        if (inCt > 1) violated = true;
+        if (ctx.phantoms.some(p => p.on && p.dissolving && p.silent)) guardFired = true;
+        if (guardFired && violated) break;
+      }
+      ok("T5 走动压缩后 守卫兜底且全程无双稳定同屏", guardFired && !violated,
+         "guardFired=" + guardFired + " violated=" + violated);
+    }
+
+    document.title = "DONE";
+    document.getElementById("out").textContent =
+      "RESULT " + (out.some(l => l.startsWith("FAIL")) ? "FAILED" : "ALL-PASS") + "\n" + out.join("\n");
+  } catch (e) {
+    document.title = "DONE";
+    document.getElementById("out").textContent = "HARNESS-ERROR " + (e && e.stack || e);
+  }
+})();
+</script></body></html>
